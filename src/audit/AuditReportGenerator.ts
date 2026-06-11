@@ -178,29 +178,72 @@ export class AuditReportGenerator {
     query: ReportQuery
   ): Promise<UsageReportItem> {
     const filterByTime = query.filterByTimeRange !== false;
+    const filterByProduct = dimension === 'PRODUCT';
 
     let totalCalls = 0;
     let totalDataRows = 0;
     let totalDataSizeKB = 0;
 
     const periodMap = new Map<string, AggregatedPeriodUsage>();
+    const periodCredCount = new Map<string, Set<string>>();
 
     for (const cred of credentials) {
+      const credPeriods = new Set<string>();
+
       for (const log of cred.usageLogs) {
         if (filterByTime) {
           if (log.timestamp < query.startTime || log.timestamp > query.endTime) {
             continue;
           }
         }
+        if (filterByProduct) {
+          if (log.productId) {
+            if (log.productId !== dimensionValue) continue;
+          } else {
+            const hasProduct = cred.order.scope.products.some(
+              p => p.productId === dimensionValue
+            );
+            if (!hasProduct) continue;
+          }
+        }
         totalCalls += log.callCount;
         totalDataRows += log.dataRows || 0;
         totalDataSizeKB += log.dataSizeKB || 0;
+
+        if (query.includePeriodDetails && log.periodKey) {
+          const key = log.periodKey;
+          if (!periodMap.has(key)) {
+            periodMap.set(key, {
+              periodKey: key,
+              usedCalls: 0,
+              usedRows: 0,
+              usedSizeKB: 0,
+              credentialCount: 0
+            });
+          }
+          const agg = periodMap.get(key)!;
+          agg.usedCalls += log.callCount;
+          agg.usedRows += log.dataRows || 0;
+          agg.usedSizeKB += log.dataSizeKB || 0;
+          credPeriods.add(key);
+        }
       }
 
       if (query.includePeriodDetails) {
-        this.accumulatePeriodUsage(periodMap, cred.currentPeriod, cred, filterByTime, query);
-        for (const hist of cred.periodHistory) {
-          this.accumulatePeriodUsage(periodMap, hist, cred, filterByTime, query);
+        for (const pkey of credPeriods) {
+          if (!periodCredCount.has(pkey)) {
+            periodCredCount.set(pkey, new Set());
+          }
+          periodCredCount.get(pkey)!.add(cred.credentialId);
+        }
+      }
+    }
+
+    if (query.includePeriodDetails) {
+      for (const [pkey, credIds] of periodCredCount) {
+        const agg = periodMap.get(pkey);
+        if (agg) {
+          agg.credentialCount = credIds.size;
         }
       }
     }
@@ -265,42 +308,6 @@ export class AuditReportGenerator {
     }
 
     return item;
-  }
-
-  private accumulatePeriodUsage(
-    periodMap: Map<string, AggregatedPeriodUsage>,
-    periodUsage: { periodKey: string; usedCalls: number; usedRows: number; usedSizeKB: number; periodStart?: number; periodEnd?: number },
-    credential: AuthCredential,
-    filterByTime: boolean,
-    query: ReportQuery
-  ): void {
-    const key = periodUsage.periodKey;
-    if (!periodMap.has(key)) {
-      periodMap.set(key, {
-        periodKey: key,
-        periodStart: periodUsage.periodStart,
-        periodEnd: periodUsage.periodEnd,
-        usedCalls: 0,
-        usedRows: 0,
-        usedSizeKB: 0,
-        credentialCount: 0
-      });
-    }
-
-    const aggregated = periodMap.get(key)!;
-
-    if (filterByTime) {
-      const ps = periodUsage.periodStart || 0;
-      const pe = periodUsage.periodEnd || Date.now();
-      if (pe < query.startTime || ps > query.endTime) {
-        return;
-      }
-    }
-
-    aggregated.usedCalls += periodUsage.usedCalls;
-    aggregated.usedRows += periodUsage.usedRows;
-    aggregated.usedSizeKB += periodUsage.usedSizeKB;
-    aggregated.credentialCount += 1;
   }
 
   private buildRejectionSummary(events: AuditRejectionEvent[]): RejectionReasonSummary[] {

@@ -34,6 +34,7 @@ export enum ErrorCode {
   POLICY_VIOLATION = 'POLICY_VIOLATION',
   POLICY_REQUIRED_FIELD = 'POLICY_REQUIRED_FIELD',
   POLICY_SUBJECT_TYPE = 'POLICY_SUBJECT_TYPE',
+  POLICY_DATA_SIZE_EXCEEDED = 'POLICY_DATA_SIZE_EXCEEDED',
   UNKNOWN_ERROR = 'UNKNOWN_ERROR'
 }
 
@@ -86,6 +87,8 @@ export interface UsageLogEntry {
   dataRows?: number;
   dataSizeKB?: number;
   callerIdentity: string;
+  productId?: string;
+  sceneId?: string;
   remark?: string;
   periodKey?: string;
 }
@@ -176,6 +179,8 @@ export interface ExecuteUsageParams {
   purpose: string;
   callerIdentity: SubjectIdentity;
   callCount: number;
+  productId?: string;
+  sceneId?: string;
   dataRows?: number;
   dataSizeKB?: number;
   remark?: string;
@@ -433,4 +438,81 @@ export interface UsageReport {
     totalRejections: number;
     rejectionSummary?: RejectionReasonSummary[];
   };
+}
+
+export type BillMatchStatus = 'MATCHED' | 'MISMATCH' | 'MISSING_IN_SDK' | 'MISSING_IN_BILL' | 'DUPLICATE';
+
+export interface PlatformBillRecord {
+  billId: string;
+  timestamp: number;
+  credentialId: string;
+  credentialNo?: string;
+  providerId: string;
+  consumerId: string;
+  productId: string;
+  sceneId?: string;
+  callCount: number;
+  dataRows?: number;
+  dataSizeKB?: number;
+  unitPrice?: number;
+  totalAmount?: number;
+  status?: 'SUCCESS' | 'FAILED' | 'REJECTED';
+  errorCode?: string;
+  remark?: string;
+}
+
+export interface BillMatchResult {
+  status: BillMatchStatus;
+  billRecord?: PlatformBillRecord;
+  sdkLogEntry?: UsageLogEntry;
+  sdkRejectionEvent?: AuditRejectionEvent;
+  diff?: {
+    callCountDiff?: number;
+    dataRowsDiff?: number;
+    dataSizeKBDiff?: number;
+    amountDiff?: number;
+  };
+  message: string;
+}
+
+export interface ReconciliationReport {
+  query: ReportQuery;
+  generatedAt: number;
+  totalBillRecords: number;
+  totalSdkLogs: number;
+  totalSdkRejections: number;
+  matchedCount: number;
+  mismatchCount: number;
+  missingInSdkCount: number;
+  missingInBillCount: number;
+  duplicateCount: number;
+  totalAmountDiff?: number;
+  results: BillMatchResult[];
+  summary: {
+    matched: number;
+    mismatch: number;
+    missingInSdk: number;
+    missingInBill: number;
+    duplicate: number;
+  };
+}
+
+export type ExportFormat = 'JSON' | 'CSV';
+
+export interface ExportOptions {
+  format: ExportFormat;
+  filePath?: string;
+  includeReport?: boolean;
+  includeRejections?: boolean;
+  includePeriodUsages?: boolean;
+  includeReconciliation?: boolean;
+  prettyPrint?: boolean;
+}
+
+export interface ExportResult {
+  success: boolean;
+  format: ExportFormat;
+  filePath?: string;
+  content?: string;
+  error?: string;
 }

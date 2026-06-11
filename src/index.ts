@@ -3,6 +3,8 @@ import { MemoryStorage } from './storage/MemoryStorage';
 import { FileStorage } from './storage/FileStorage';
 import { AuthPolicyManager } from './policy/AuthPolicyManager';
 import { AuditReportGenerator } from './audit/AuditReportGenerator';
+import { ReconciliationEngine } from './audit/ReconciliationEngine';
+import { ReportExporter } from './audit/ReportExporter';
 import {
   AuthCredential,
   AuditRejectionEvent,
@@ -39,7 +41,14 @@ import {
   PolicyMatchResult,
   PolicyRule,
   RejectionReasonSummary,
-  AggregatedPeriodUsage
+  AggregatedPeriodUsage,
+  PlatformBillRecord,
+  ReconciliationReport,
+  BillMatchResult,
+  BillMatchStatus,
+  ExportOptions,
+  ExportResult,
+  ExportFormat
 } from './types';
 import {
   calculateRemainingDays,
@@ -64,6 +73,7 @@ export class DataAuthCredentialSDK {
   private storageInstance: IStorage;
   private policyManager: AuthPolicyManager;
   private reportGenerator: AuditReportGenerator;
+  private reconciliationEngine: ReconciliationEngine;
 
   constructor(options?: SDKOptions) {
     if (options?.storage) {
@@ -77,6 +87,7 @@ export class DataAuthCredentialSDK {
     this.policyManager = options?.policyManager || new AuthPolicyManager();
     this.manager = new CredentialManager(this.storageInstance, this.policyManager);
     this.reportGenerator = new AuditReportGenerator(this.storageInstance);
+    this.reconciliationEngine = new ReconciliationEngine(this.storageInstance);
   }
 
   async createAuthorization(params: CreateOrderParams): Promise<{
@@ -374,6 +385,31 @@ export class DataAuthCredentialSDK {
   }): Promise<AuditRejectionEvent[]> {
     return this.manager.listRejectionEvents(filter);
   }
+
+  async reconcile(
+    billRecords: PlatformBillRecord[],
+    query: Partial<ReportQuery> = {}
+  ): Promise<ReconciliationReport> {
+    const now = Date.now();
+    const fullQuery: ReportQuery = {
+      startTime: 0,
+      endTime: now,
+      filterByTimeRange: true,
+      includePeriodDetails: true,
+      includeRejectionStats: true,
+      includeRevocationRecords: true,
+      ...query
+    };
+    return this.reconciliationEngine.reconcile(billRecords, fullQuery);
+  }
+
+  exportReport(
+    report: UsageReport,
+    options: ExportOptions,
+    reconciliationReport?: ReconciliationReport
+  ): ExportResult {
+    return ReportExporter.export(report, options, reconciliationReport);
+  }
 }
 
 export {
@@ -413,10 +449,19 @@ export {
   PolicyMatchResult,
   PolicyRule,
   PolicyTargetType,
+  PlatformBillRecord,
+  ReconciliationReport,
+  BillMatchResult,
+  BillMatchStatus,
+  ExportOptions,
+  ExportResult,
+  ExportFormat,
   MemoryStorage,
   FileStorage,
   AuthPolicyManager,
   AuditReportGenerator,
+  ReconciliationEngine,
+  ReportExporter,
   calculateRemainingDays,
   formatTimestamp,
   generateCredentialNo,

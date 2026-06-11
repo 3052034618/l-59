@@ -99,7 +99,7 @@ export class AuthPolicyManager {
       ruleType: 'MAX_DATA_SIZE',
       ruleName: `数据量限制策略 - ${targetType}:${targetValue}`,
       config: { maxSizeKB, minSizeKB: minSizeKB || 0 },
-      errorCode: ErrorCode.INVALID_DATA_SIZE
+      errorCode: ErrorCode.POLICY_DATA_SIZE_EXCEEDED
     };
 
     this.addPolicy({

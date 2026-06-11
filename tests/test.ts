@@ -587,7 +587,7 @@ let credentialId: string = '';
     expectedDataSizeKB: 2000
   });
   assert(policyValResult.type === ValidationResultType.REJECT, '数据量超限被策略拒绝');
-  assert(policyValResult.code === ErrorCode.INVALID_DATA_SIZE, '错误码正确');
+  assert(policyValResult.code === ErrorCode.POLICY_DATA_SIZE_EXCEEDED, '错误码正确');
 
   console.log('\n--- 测试30: 时间段报表 - 不同时间段数值不同 ---');
   const timeSdk = new DataAuthCredentialSDK();
@@ -655,6 +655,8 @@ let credentialId: string = '';
   console.log('\n--- 测试31: 异常拒绝事件沉淀 + 分类统计 ---');
   const rejectSdk = new DataAuthCredentialSDK();
   rejectSdk.addRequiredFieldPolicy('PRODUCT', 'PROD-001', ['purpose', 'expectedDataRows'], '拒绝事件测试策略');
+  rejectSdk.addSubjectTypePolicy('SCENE', 'SCENE-001', ['INDIVIDUAL'], undefined, '主体类型限制策略');
+  rejectSdk.addDataSizeLimitPolicy('PRODUCT', 'PROD-001', 100, undefined, '数据量限制策略');
 
   const rCreate = await rejectSdk.createAuthorization({
     provider,
@@ -667,20 +669,7 @@ let credentialId: string = '';
   });
   const rCredId = rCreate.credential!.credentialId;
 
-  await rejectSdk.validate({
-    credentialId: rCredId,
-    productId: 'PROD-001',
-    sceneId: 'SCENE-001',
-    callerIdentity: consumer
-  });
-  await rejectSdk.validate({
-    credentialId: rCredId,
-    productId: 'PROD-001',
-    sceneId: 'SCENE-001',
-    callerIdentity: consumer
-  });
-
-  const wrongConsumer = { id: 'WRONG', name: '别人', type: 'ORGANIZATION' as const };
+  const wrongConsumer = { id: 'WRONG', name: '别人', type: 'INDIVIDUAL' as const };
   await rejectSdk.validate({
     credentialId: rCredId,
     productId: 'PROD-001',
@@ -690,11 +679,53 @@ let credentialId: string = '';
     expectedDataRows: 100
   });
 
+  const orgConsumer = { id: consumer.id, name: consumer.name, type: 'ORGANIZATION' as const };
+  await rejectSdk.validate({
+    credentialId: rCredId,
+    productId: 'PROD-001',
+    sceneId: 'SCENE-001',
+    callerIdentity: orgConsumer,
+    purpose: '测试',
+    expectedDataRows: 100,
+    expectedDataSizeKB: 200
+  });
+
   await rejectSdk.executeUsage({
     credentialId: rCredId,
     purpose: '测试',
     callerIdentity: consumer,
     callCount: -1
+  });
+
+  await rejectSdk.executeUsage({
+    credentialId: rCredId,
+    purpose: '测试',
+    callerIdentity: consumer,
+    callCount: 1,
+    dataRows: 0
+  });
+
+  await rejectSdk.executeUsage({
+    credentialId: rCredId,
+    purpose: '测试',
+    callerIdentity: consumer,
+    callCount: 200
+  });
+
+  const allPolicies = rejectSdk.listPolicies();
+  const subjectPolicy = allPolicies.find(p => p.policyName === '主体类型限制策略');
+  if (subjectPolicy) {
+    rejectSdk.removePolicy(subjectPolicy.policyId);
+  }
+
+  await rejectSdk.validate({
+    credentialId: rCredId,
+    productId: 'PROD-001',
+    sceneId: 'SCENE-001',
+    callerIdentity: orgConsumer,
+    purpose: '测试',
+    expectedDataRows: 100,
+    expectedDataSizeKB: 200
   });
 
   const rejectionEvents = await rejectSdk.listRejectionEvents();
@@ -899,7 +930,289 @@ let credentialId: string = '';
   assert(revokedRej!.category === 'CREDENTIAL_STATUS', '撤销拒绝分类为CREDENTIAL_STATUS');
   console.log(`撤销拒绝事件: errorCode=${revokedRej!.errorCode}, category=${revokedRej!.category}`);
 
-  console.log('\n--- 测试36: 清理测试数据 ---');
+  console.log('\n--- 测试36: executeUsage 携带 productId/sceneId ---');
+  const prodSdk = new DataAuthCredentialSDK();
+
+  const pc1 = await prodSdk.createAuthorization({
+    provider,
+    consumer,
+    scope: {
+      products: [
+        { productId: 'PROD-P1', productName: '产品1', dataCategory: 'A', providerId: provider.id },
+        { productId: 'PROD-P2', productName: '产品2', dataCategory: 'B', providerId: provider.id }
+      ],
+      scenes: [{ sceneId: 'SCENE-S1', sceneName: '场景1', sceneDescription: '', sceneType: 'A' }],
+      allowedPurposes: ['测试']
+    },
+    quota: { maxCalls: 100, periodType: 'MONTHLY' },
+    validity,
+    purpose: '多产品测试',
+    createdBy: 'admin'
+  });
+  const pcId = pc1.credential!.credentialId;
+
+  await prodSdk.executeUsage({
+    credentialId: pcId,
+    purpose: '测试',
+    callerIdentity: consumer,
+    callCount: 5,
+    productId: 'PROD-P1',
+    sceneId: 'SCENE-S1',
+    dataRows: 100,
+    dataSizeKB: 500
+  });
+  await prodSdk.executeUsage({
+    credentialId: pcId,
+    purpose: '测试',
+    callerIdentity: consumer,
+    callCount: 3,
+    productId: 'PROD-P2',
+    sceneId: 'SCENE-S1',
+    dataRows: 60,
+    dataSizeKB: 300
+  });
+
+  const pcCred = await prodSdk.getCredential(pcId);
+  const logs = pcCred!.usageLogs;
+  assert(logs.length === 2, '2条调用日志');
+  assert(logs[0].productId === 'PROD-P1', '日志1 productId正确');
+  assert(logs[1].productId === 'PROD-P2', '日志2 productId正确');
+  assert(logs[0].sceneId === 'SCENE-S1', '日志1 sceneId正确');
+  console.log('日志携带 productId/sceneId 正常');
+
+  console.log('\n--- 测试37: 按产品维度查报表，分别统计 ---');
+  const rptP1 = await prodSdk.generateReportByProduct('PROD-P1');
+  const rptP2 = await prodSdk.generateReportByProduct('PROD-P2');
+
+  assert(rptP1.summary.totalCalls === 5, `产品1调用=5（实际${rptP1.summary.totalCalls}）`);
+  assert(rptP1.summary.totalDataRows === 100, '产品1行数=100');
+  assert(rptP2.summary.totalCalls === 3, `产品2调用=3（实际${rptP2.summary.totalCalls}）`);
+  assert(rptP2.summary.totalDataSizeKB === 300, '产品2数据量=300KB');
+  assert(rptP1.items[0].dimension === 'PRODUCT', '维度为PRODUCT');
+  console.log(`产品1: ${rptP1.summary.totalCalls}次, 产品2: ${rptP2.summary.totalCalls}次，分别统计正常`);
+
+  console.log('\n--- 测试38: 周期明细与查询区间一致 ---');
+  const now = Date.now();
+  await prodSdk.executeUsage({
+    credentialId: pcId,
+    purpose: 'T1调用',
+    callerIdentity: consumer,
+    callCount: 2,
+    productId: 'PROD-P1',
+    sceneId: 'SCENE-S1',
+    dataRows: 40,
+    dataSizeKB: 200
+  });
+  const t38t1End = Date.now();
+  await new Promise(r => setTimeout(r, 10));
+  await prodSdk.executeUsage({
+    credentialId: pcId,
+    purpose: 'T2调用',
+    callerIdentity: consumer,
+    callCount: 4,
+    productId: 'PROD-P1',
+    sceneId: 'SCENE-S1',
+    dataRows: 80,
+    dataSizeKB: 400
+  });
+
+  const rptT1 = await prodSdk.generateReportByProduct('PROD-P1', {
+    startTime: 0,
+    endTime: t38t1End,
+    includePeriodDetails: true
+  });
+  const rptT2 = await prodSdk.generateReportByProduct('PROD-P1', {
+    startTime: t38t1End + 1,
+    endTime: Date.now(),
+    includePeriodDetails: true
+  });
+
+  assert(rptT1.summary.totalCalls === 7, `T1产品1调用=7（实际${rptT1.summary.totalCalls}）`);
+  assert(rptT2.summary.totalCalls === 4, `T2产品1调用=4（实际${rptT2.summary.totalCalls}）`);
+  assert(rptT1.items[0].periodUsages![0].usedCalls === 7, 'T1周期用量=7（不包含T2的4次）');
+  assert(rptT2.items[0].periodUsages![0].usedCalls === 4, 'T2周期用量=4（不包含T1的7次）');
+  console.log(`T1周期用量=${rptT1.items[0].periodUsages![0].usedCalls}, T2周期用量=${rptT2.items[0].periodUsages![0].usedCalls}，与查询区间一致`);
+
+  console.log('\n--- 测试39: 对账引擎 - 完全匹配 + 差异 + 漏记 ---');
+  const reconSdk = new DataAuthCredentialSDK();
+  const rc = await reconSdk.createAuthorization({
+    provider,
+    consumer,
+    scope: {
+      products: [{ productId: 'PROD-R1', productName: '对账产品', dataCategory: 'A', providerId: provider.id }],
+      scenes: [{ sceneId: 'SCENE-R1', sceneName: '对账场景', sceneDescription: '', sceneType: 'A' }],
+      allowedPurposes: ['对账']
+    },
+    quota: { maxCalls: 100, periodType: 'MONTHLY' },
+    validity,
+    purpose: '对账测试',
+    createdBy: 'admin'
+  });
+  const rcId = rc.credential!.credentialId;
+
+  const exec1 = await reconSdk.executeUsage({
+    credentialId: rcId,
+    purpose: '对账',
+    callerIdentity: consumer,
+    callCount: 2,
+    productId: 'PROD-R1',
+    sceneId: 'SCENE-R1',
+    dataRows: 50,
+    dataSizeKB: 200
+  });
+  const exec2 = await reconSdk.executeUsage({
+    credentialId: rcId,
+    purpose: '对账',
+    callerIdentity: consumer,
+    callCount: 3,
+    productId: 'PROD-R1',
+    sceneId: 'SCENE-R1',
+    dataRows: 75,
+    dataSizeKB: 300
+  });
+
+  const unitPrice = 1.5;
+  const bills = [
+    {
+      billId: 'BILL-R001',
+      timestamp: exec1.logEntry!.timestamp,
+      credentialId: rcId,
+      providerId: provider.id,
+      consumerId: consumer.id,
+      productId: 'PROD-R1',
+      sceneId: 'SCENE-R1',
+      callCount: 2,
+      dataRows: 50,
+      dataSizeKB: 200,
+      unitPrice,
+      totalAmount: 3,
+      status: 'SUCCESS' as const
+    },
+    {
+      billId: 'BILL-R002',
+      timestamp: exec2.logEntry!.timestamp,
+      credentialId: rcId,
+      providerId: provider.id,
+      consumerId: consumer.id,
+      productId: 'PROD-R1',
+      sceneId: 'SCENE-R1',
+      callCount: 5,
+      dataRows: 75,
+      dataSizeKB: 300,
+      unitPrice,
+      totalAmount: 7.5,
+      status: 'SUCCESS' as const
+    },
+    {
+      billId: 'BILL-R003',
+      timestamp: Date.now() + 10 * 60 * 1000,
+      credentialId: rcId,
+      providerId: provider.id,
+      consumerId: consumer.id,
+      productId: 'PROD-R1',
+      sceneId: 'SCENE-R1',
+      callCount: 1,
+      unitPrice,
+      totalAmount: 1.5,
+      status: 'SUCCESS' as const
+    }
+  ];
+
+  const recon = await reconSdk.reconcile(bills, {
+    endTime: Date.now() + 24 * 60 * 60 * 1000
+  });
+
+  console.log('对账结果详情:', recon.results.map(r => ({ status: r.status, billId: r.billRecord?.billId, logId: r.sdkLogEntry?.logId, message: r.message.substring(0, 50) })));
+  console.log('对账汇总:', recon.summary);
+
+  assert(recon.totalBillRecords === 3, '账单记录=3');
+  assert(recon.totalSdkLogs === 2, 'SDK日志=2');
+  assert(recon.summary.matched === 1, `完全匹配=1（实际${recon.summary.matched}）`);
+  assert(recon.summary.mismatch === 1, `存在差异=1（实际${recon.summary.mismatch}）`);
+  assert(recon.summary.missingInSdk === 1, `SDK漏记=1（实际${recon.summary.missingInSdk}）`);
+  assert(recon.summary.missingInBill === 0, `账单漏记=0（实际${recon.summary.missingInBill}）`);
+
+  const mismatch = recon.results.find(r => r.status === 'MISMATCH');
+  assert(mismatch !== undefined, '存在差异记录');
+  assert(mismatch!.diff?.callCountDiff === -2, `次数差=-2（实际${mismatch!.diff?.callCountDiff}）`);
+  assert(mismatch!.diff?.amountDiff === 3, `金额差=3（实际${mismatch!.diff?.amountDiff}）`);
+  console.log(`对账结果: 匹配${recon.summary.matched}, 差异${recon.summary.mismatch}, SDK漏记${recon.summary.missingInSdk}`);
+  console.log(`金额差异=${mismatch!.diff?.amountDiff}元，次数差异=${mismatch!.diff?.callCountDiff}次`);
+
+  console.log('\n--- 测试40: 报表导出 JSON + CSV ---');
+  const testReport = await prodSdk.generateUsageReport({
+    startTime: 0,
+    endTime: Date.now(),
+    includePeriodDetails: true,
+    includeRejectionStats: true
+  });
+
+  const jsonResult = prodSdk.exportReport(testReport, {
+    format: 'JSON',
+    prettyPrint: false
+  });
+  assert(jsonResult.success === true, 'JSON导出成功');
+  assert(jsonResult.content !== undefined, 'JSON内容存在');
+  const parsed = JSON.parse(jsonResult.content!);
+  assert(parsed.report !== undefined, '包含report');
+  assert(parsed.report.summary.totalCalls >= 5, 'report摘要正确');
+
+  const csvResult = prodSdk.exportReport(testReport, {
+    format: 'CSV'
+  });
+  assert(csvResult.success === true, 'CSV导出成功');
+  assert(csvResult.content !== undefined, 'CSV内容存在');
+  assert(csvResult.content!.includes('用量汇总报表'), '包含用量汇总报表标题');
+  assert(csvResult.content!.includes('维度,维度值'), '包含CSV表头');
+
+  console.log('JSON和CSV导出正常');
+
+  console.log('\n--- 测试41: 对账引擎 - 拒绝事件匹配 + 账单重复 ---');
+  await reconSdk.validate({
+    credentialId: rcId,
+    productId: 'PROD-R1',
+    sceneId: 'SCENE-R1',
+    callerIdentity: consumer
+  });
+  const rejections = await reconSdk.listRejectionEvents();
+  const lastRej = rejections[rejections.length - 1];
+
+  const billsWithReject = [
+    {
+      billId: 'BILL-R004',
+      timestamp: lastRej.timestamp,
+      credentialId: rcId,
+      providerId: provider.id,
+      consumerId: consumer.id,
+      productId: 'PROD-R1',
+      sceneId: 'SCENE-R1',
+      callCount: 1,
+      unitPrice,
+      totalAmount: 0,
+      status: 'REJECTED' as const,
+      errorCode: String(lastRej.errorCode)
+    },
+    {
+      billId: 'BILL-R004',
+      timestamp: lastRej.timestamp,
+      credentialId: rcId,
+      providerId: provider.id,
+      consumerId: consumer.id,
+      productId: 'PROD-R1',
+      sceneId: 'SCENE-R1',
+      callCount: 1,
+      status: 'REJECTED' as const
+    }
+  ];
+
+  const recon2 = await reconSdk.reconcile(billsWithReject, {
+    endTime: Date.now() + 60000
+  });
+  assert(recon2.summary.matched === 1, '拒绝事件匹配=1');
+  assert(recon2.summary.duplicate === 1, '账单重复=1');
+  console.log(`拒绝事件匹配+账单重复测试通过: 匹配${recon2.summary.matched}, 重复${recon2.summary.duplicate}`);
+
+  console.log('\n--- 测试42: 清理测试数据 ---');
   cleanup();
   assert(!fs.existsSync(testStorageDir), '测试数据已清理');
 

@@ -62,6 +62,7 @@ export function getErrorMessage(code: ErrorCode): string {
     [ErrorCode.POLICY_VIOLATION]: '违反授权策略',
     [ErrorCode.POLICY_REQUIRED_FIELD]: '缺少策略要求的必填字段',
     [ErrorCode.POLICY_SUBJECT_TYPE]: '主体类型不符合策略限制',
+    [ErrorCode.POLICY_DATA_SIZE_EXCEEDED]: '数据量超过策略限制',
     [ErrorCode.UNKNOWN_ERROR]: '未知错误'
   };
   return errorMessages[code] || errorMessages[ErrorCode.UNKNOWN_ERROR];
@@ -177,6 +178,7 @@ export function getRejectionCategory(errorCode: ErrorCode): RejectionCategory {
     [ErrorCode.POLICY_VIOLATION]: 'POLICY',
     [ErrorCode.POLICY_REQUIRED_FIELD]: 'POLICY',
     [ErrorCode.POLICY_SUBJECT_TYPE]: 'POLICY',
+    [ErrorCode.POLICY_DATA_SIZE_EXCEEDED]: 'POLICY',
     [ErrorCode.IDENTITY_MISMATCH]: 'IDENTITY',
     [ErrorCode.CREDENTIAL_REVOKED]: 'CREDENTIAL_STATUS',
     [ErrorCode.CREDENTIAL_EXPIRED]: 'CREDENTIAL_STATUS',

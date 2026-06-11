@@ -202,6 +202,9 @@ export class CredentialManager {
       }
       const hasAnyPolicy = this.policyManager.listPolicies().length > 0;
       if (!hasAnyPolicy && !params.purpose) {
+        await this.recordRejection(ErrorCode.POLICY_REQUIRED_FIELD, '需要补充必要信息', refreshedCred, params, {
+          details: { missingFields: ['purpose'] }
+        });
         return {
           type: ValidationResultType.PENDING,
           passed: false,
@@ -358,25 +361,6 @@ export class CredentialManager {
 
   async executeUsage(params: ExecuteUsageParams): Promise<ExecuteUsageResult> {
     try {
-      if (!params.callCount || params.callCount <= 0) {
-        return {
-          success: false,
-          error: formatError(ErrorCode.INVALID_CALL_COUNT, getErrorMessage(ErrorCode.INVALID_CALL_COUNT))
-        };
-      }
-      if (params.dataRows !== undefined && params.dataRows <= 0) {
-        return {
-          success: false,
-          error: formatError(ErrorCode.INVALID_DATA_ROWS, getErrorMessage(ErrorCode.INVALID_DATA_ROWS))
-        };
-      }
-      if (params.dataSizeKB !== undefined && params.dataSizeKB <= 0) {
-        return {
-          success: false,
-          error: formatError(ErrorCode.INVALID_DATA_SIZE, getErrorMessage(ErrorCode.INVALID_DATA_SIZE))
-        };
-      }
-
       const credential = await this.storage.get(params.credentialId);
       if (!credential) {
         return {
@@ -386,9 +370,37 @@ export class CredentialManager {
       }
 
       if (credential.status !== CredentialStatus.ACTIVE) {
+        const errCode = credential.status === CredentialStatus.REVOKED
+          ? ErrorCode.CREDENTIAL_REVOKED
+          : credential.status === CredentialStatus.EXPIRED
+          ? ErrorCode.CREDENTIAL_EXPIRED
+          : ErrorCode.CREDENTIAL_EXHAUSTED;
+        await this.recordRejection(errCode, getErrorMessage(errCode), credential, params);
         return {
           success: false,
-          error: formatError(ErrorCode.INVALID_CREDENTIAL, `凭证状态为 ${credential.status}，无法执行扣减`)
+          error: formatError(errCode, getErrorMessage(errCode))
+        };
+      }
+
+      if (!params.callCount || params.callCount <= 0) {
+        await this.recordRejection(ErrorCode.INVALID_CALL_COUNT, getErrorMessage(ErrorCode.INVALID_CALL_COUNT), credential, params);
+        return {
+          success: false,
+          error: formatError(ErrorCode.INVALID_CALL_COUNT, getErrorMessage(ErrorCode.INVALID_CALL_COUNT))
+        };
+      }
+      if (params.dataRows !== undefined && params.dataRows <= 0) {
+        await this.recordRejection(ErrorCode.INVALID_DATA_ROWS, getErrorMessage(ErrorCode.INVALID_DATA_ROWS), credential, params);
+        return {
+          success: false,
+          error: formatError(ErrorCode.INVALID_DATA_ROWS, getErrorMessage(ErrorCode.INVALID_DATA_ROWS))
+        };
+      }
+      if (params.dataSizeKB !== undefined && params.dataSizeKB <= 0) {
+        await this.recordRejection(ErrorCode.INVALID_DATA_SIZE, getErrorMessage(ErrorCode.INVALID_DATA_SIZE), credential, params);
+        return {
+          success: false,
+          error: formatError(ErrorCode.INVALID_DATA_SIZE, getErrorMessage(ErrorCode.INVALID_DATA_SIZE))
         };
       }
 
@@ -398,11 +410,13 @@ export class CredentialManager {
       const newUsedCalls = refreshedCred.currentPeriod.usedCalls + params.callCount;
 
       if (newUsedCalls > maxCalls) {
+        const msg = `调用次数额度不足，当前周期已用 ${refreshedCred.currentPeriod.usedCalls} 次，请求 ${params.callCount} 次，上限 ${maxCalls} 次`;
+        await this.recordRejection(ErrorCode.QUOTA_INSUFFICIENT, msg, refreshedCred, params);
         return {
           success: false,
           error: formatError(
             ErrorCode.QUOTA_INSUFFICIENT,
-            `调用次数额度不足，当前周期已用 ${refreshedCred.currentPeriod.usedCalls} 次，请求 ${params.callCount} 次，上限 ${maxCalls} 次`
+            msg
           )
         };
       }
@@ -410,11 +424,13 @@ export class CredentialManager {
       if (params.dataRows !== undefined && refreshedCred.order.quota.maxDataRows !== undefined) {
         const newUsedRows = refreshedCred.currentPeriod.usedRows + params.dataRows;
         if (newUsedRows > refreshedCred.order.quota.maxDataRows) {
+          const msg = `数据行数额度不足，当前周期已用 ${refreshedCred.currentPeriod.usedRows} 行，请求 ${params.dataRows} 行，上限 ${refreshedCred.order.quota.maxDataRows} 行`;
+          await this.recordRejection(ErrorCode.QUOTA_INSUFFICIENT, msg, refreshedCred, params);
           return {
             success: false,
             error: formatError(
               ErrorCode.QUOTA_INSUFFICIENT,
-              `数据行数额度不足，当前周期已用 ${refreshedCred.currentPeriod.usedRows} 行，请求 ${params.dataRows} 行，上限 ${refreshedCred.order.quota.maxDataRows} 行`
+              msg
             )
           };
         }
@@ -423,11 +439,13 @@ export class CredentialManager {
       if (params.dataSizeKB !== undefined && refreshedCred.order.quota.maxDataSizeKB !== undefined) {
         const newUsedSize = refreshedCred.currentPeriod.usedSizeKB + params.dataSizeKB;
         if (newUsedSize > refreshedCred.order.quota.maxDataSizeKB) {
+          const msg = `数据量额度不足，当前周期已用 ${refreshedCred.currentPeriod.usedSizeKB} KB，请求 ${params.dataSizeKB} KB，上限 ${refreshedCred.order.quota.maxDataSizeKB} KB`;
+          await this.recordRejection(ErrorCode.QUOTA_INSUFFICIENT, msg, refreshedCred, params);
           return {
             success: false,
             error: formatError(
               ErrorCode.QUOTA_INSUFFICIENT,
-              `数据量额度不足，当前周期已用 ${refreshedCred.currentPeriod.usedSizeKB} KB，请求 ${params.dataSizeKB} KB，上限 ${refreshedCred.order.quota.maxDataSizeKB} KB`
+              msg
             )
           };
         }
@@ -444,6 +462,8 @@ export class CredentialManager {
         dataRows: params.dataRows,
         dataSizeKB: params.dataSizeKB,
         callerIdentity: params.callerIdentity.id,
+        productId: params.productId,
+        sceneId: params.sceneId,
         remark: params.remark,
         periodKey
       };
@@ -746,29 +766,6 @@ export class CredentialManager {
     error?: SDKError;
   }> {
     try {
-      const callCount = logEntry.callCount;
-      const dataRows = logEntry.dataRows;
-      const dataSizeKB = logEntry.dataSizeKB;
-
-      if (!callCount || callCount <= 0) {
-        return {
-          success: false,
-          error: formatError(ErrorCode.INVALID_CALL_COUNT, getErrorMessage(ErrorCode.INVALID_CALL_COUNT))
-        };
-      }
-      if (dataRows !== undefined && dataRows <= 0) {
-        return {
-          success: false,
-          error: formatError(ErrorCode.INVALID_DATA_ROWS, getErrorMessage(ErrorCode.INVALID_DATA_ROWS))
-        };
-      }
-      if (dataSizeKB !== undefined && dataSizeKB <= 0) {
-        return {
-          success: false,
-          error: formatError(ErrorCode.INVALID_DATA_SIZE, getErrorMessage(ErrorCode.INVALID_DATA_SIZE))
-        };
-      }
-
       const credential = await this.storage.get(credentialId);
       if (!credential) {
         return {
@@ -777,30 +774,68 @@ export class CredentialManager {
         };
       }
 
+      const callCount = logEntry.callCount;
+      const dataRows = logEntry.dataRows;
+      const dataSizeKB = logEntry.dataSizeKB;
+
+      const rejectParams = {
+        productId: logEntry.productId,
+        sceneId: logEntry.sceneId,
+        callerIdentity: { id: logEntry.callerIdentity, type: 'ORGANIZATION' as const, name: '' }
+      };
+
+      if (!callCount || callCount <= 0) {
+        await this.recordRejection(ErrorCode.INVALID_CALL_COUNT, getErrorMessage(ErrorCode.INVALID_CALL_COUNT), credential, rejectParams);
+        return {
+          success: false,
+          error: formatError(ErrorCode.INVALID_CALL_COUNT, getErrorMessage(ErrorCode.INVALID_CALL_COUNT))
+        };
+      }
+      if (dataRows !== undefined && dataRows <= 0) {
+        await this.recordRejection(ErrorCode.INVALID_DATA_ROWS, getErrorMessage(ErrorCode.INVALID_DATA_ROWS), credential, rejectParams);
+        return {
+          success: false,
+          error: formatError(ErrorCode.INVALID_DATA_ROWS, getErrorMessage(ErrorCode.INVALID_DATA_ROWS))
+        };
+      }
+      if (dataSizeKB !== undefined && dataSizeKB <= 0) {
+        await this.recordRejection(ErrorCode.INVALID_DATA_SIZE, getErrorMessage(ErrorCode.INVALID_DATA_SIZE), credential, rejectParams);
+        return {
+          success: false,
+          error: formatError(ErrorCode.INVALID_DATA_SIZE, getErrorMessage(ErrorCode.INVALID_DATA_SIZE))
+        };
+      }
+
       const refreshedCred = await this.refreshPeriodIfNeeded(credential);
 
       const maxCalls = refreshedCred.order.quota.maxCalls;
       if (refreshedCred.currentPeriod.usedCalls + callCount > maxCalls) {
+        const msg = '追加日志会导致当前周期调用次数超过上限';
+        await this.recordRejection(ErrorCode.QUOTA_INSUFFICIENT, msg, refreshedCred, rejectParams);
         return {
           success: false,
-          error: formatError(ErrorCode.QUOTA_INSUFFICIENT, '追加日志会导致当前周期调用次数超过上限')
+          error: formatError(ErrorCode.QUOTA_INSUFFICIENT, msg)
         };
       }
 
       if (dataRows !== undefined && refreshedCred.order.quota.maxDataRows !== undefined) {
         if (refreshedCred.currentPeriod.usedRows + dataRows > refreshedCred.order.quota.maxDataRows) {
+          const msg = '追加日志会导致当前周期数据行数超过上限';
+          await this.recordRejection(ErrorCode.QUOTA_INSUFFICIENT, msg, refreshedCred, rejectParams);
           return {
             success: false,
-            error: formatError(ErrorCode.QUOTA_INSUFFICIENT, '追加日志会导致当前周期数据行数超过上限')
+            error: formatError(ErrorCode.QUOTA_INSUFFICIENT, msg)
           };
         }
       }
 
       if (dataSizeKB !== undefined && refreshedCred.order.quota.maxDataSizeKB !== undefined) {
         if (refreshedCred.currentPeriod.usedSizeKB + dataSizeKB > refreshedCred.order.quota.maxDataSizeKB) {
+          const msg = '追加日志会导致当前周期数据量超过上限';
+          await this.recordRejection(ErrorCode.QUOTA_INSUFFICIENT, msg, refreshedCred, rejectParams);
           return {
             success: false,
-            error: formatError(ErrorCode.QUOTA_INSUFFICIENT, '追加日志会导致当前周期数据量超过上限')
+            error: formatError(ErrorCode.QUOTA_INSUFFICIENT, msg)
           };
         }
       }
