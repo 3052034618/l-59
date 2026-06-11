@@ -1,9 +1,12 @@
 import { CredentialManager } from './CredentialManager';
 import { MemoryStorage } from './storage/MemoryStorage';
 import { FileStorage } from './storage/FileStorage';
+import { AuthPolicyManager } from './policy/AuthPolicyManager';
+import { AuditReportGenerator } from './audit/AuditReportGenerator';
 import {
   AuthCredential,
   AuditSummary,
+  AuthPolicy,
   BatchValidationItem,
   BatchValidationResult,
   CreateOrderParams,
@@ -12,22 +15,27 @@ import {
   ExecuteUsageParams,
   ExecuteUsageResult,
   IStorage,
+  PolicyTargetType,
   PreCheckParams,
   PreCheckResult,
+  QuotaConfig,
+  ReportQuery,
   SDKError,
   SubjectIdentity,
   UsageLogEntry,
+  UsageReport,
   ValidationParams,
   ValidationResult,
   ValidationResultType,
   AuthorizationOrder,
-  QuotaConfig,
   UsageScope,
   ValidityPeriod,
   ProductInfo,
   UsageScene,
   PeriodUsage,
-  PeriodType
+  PeriodType,
+  PolicyMatchResult,
+  PolicyRule
 } from './types';
 import {
   calculateRemainingDays,
@@ -44,11 +52,14 @@ export interface SDKOptions {
   storage?: IStorage;
   storageType?: 'memory' | 'file';
   storagePath?: string;
+  policyManager?: AuthPolicyManager;
 }
 
 export class DataAuthCredentialSDK {
   private manager: CredentialManager;
   private storageInstance: IStorage;
+  private policyManager: AuthPolicyManager;
+  private reportGenerator: AuditReportGenerator;
 
   constructor(options?: SDKOptions) {
     if (options?.storage) {
@@ -58,7 +69,10 @@ export class DataAuthCredentialSDK {
     } else {
       this.storageInstance = new MemoryStorage();
     }
-    this.manager = new CredentialManager(this.storageInstance);
+
+    this.policyManager = options?.policyManager || new AuthPolicyManager();
+    this.manager = new CredentialManager(this.storageInstance, this.policyManager);
+    this.reportGenerator = new AuditReportGenerator(this.storageInstance);
   }
 
   async createAuthorization(params: CreateOrderParams): Promise<{
@@ -282,11 +296,73 @@ export class DataAuthCredentialSDK {
   getPeriodRange(periodType: PeriodType, timestamp: number): { start: number; end: number } {
     return getPeriodRange(periodType, timestamp);
   }
+
+  addPolicy(policy: AuthPolicy): void {
+    this.policyManager.addPolicy(policy);
+  }
+
+  removePolicy(policyId: string): boolean {
+    return this.policyManager.removePolicy(policyId);
+  }
+
+  getPolicy(policyId: string): AuthPolicy | undefined {
+    return this.policyManager.getPolicy(policyId);
+  }
+
+  listPolicies(): AuthPolicy[] {
+    return this.policyManager.listPolicies();
+  }
+
+  addRequiredFieldPolicy(
+    targetType: PolicyTargetType,
+    targetValue: string,
+    requiredFields: string[],
+    policyName?: string
+  ): string {
+    return this.policyManager.addRequiredFieldPolicy(targetType, targetValue, requiredFields, policyName);
+  }
+
+  addSubjectTypePolicy(
+    targetType: PolicyTargetType,
+    targetValue: string,
+    allowedTypes: Array<'ORGANIZATION' | 'INDIVIDUAL' | 'SYSTEM'>,
+    deniedTypes?: Array<'ORGANIZATION' | 'INDIVIDUAL' | 'SYSTEM'>,
+    policyName?: string
+  ): string {
+    return this.policyManager.addSubjectTypePolicy(targetType, targetValue, allowedTypes, deniedTypes, policyName);
+  }
+
+  addDataSizeLimitPolicy(
+    targetType: PolicyTargetType,
+    targetValue: string,
+    maxSizeKB: number,
+    minSizeKB?: number,
+    policyName?: string
+  ): string {
+    return this.policyManager.addDataSizeLimitPolicy(targetType, targetValue, maxSizeKB, minSizeKB, policyName);
+  }
+
+  async generateUsageReport(query: ReportQuery): Promise<UsageReport> {
+    return this.reportGenerator.generateReport(query);
+  }
+
+  async generateReportByProvider(providerId: string, query?: Partial<ReportQuery>): Promise<UsageReport> {
+    return this.reportGenerator.generateByProvider(providerId, query);
+  }
+
+  async generateReportByConsumer(consumerId: string, query?: Partial<ReportQuery>): Promise<UsageReport> {
+    return this.reportGenerator.generateByConsumer(consumerId, query);
+  }
+
+  async generateReportByProduct(productId: string, query?: Partial<ReportQuery>): Promise<UsageReport> {
+    return this.reportGenerator.generateByProduct(productId, query);
+  }
 }
 
 export {
   AuthCredential,
   AuditSummary,
+  AuthPolicy,
   AuthorizationOrder,
   BatchValidationItem,
   BatchValidationResult,
@@ -301,9 +377,11 @@ export {
   PreCheckParams,
   PreCheckResult,
   QuotaConfig,
+  ReportQuery,
   SDKError,
   SubjectIdentity,
   UsageLogEntry,
+  UsageReport,
   UsageScope,
   ValidationParams,
   ValidationResult,
@@ -311,8 +389,13 @@ export {
   ValidityPeriod,
   ProductInfo,
   UsageScene,
+  PolicyMatchResult,
+  PolicyRule,
+  PolicyTargetType,
   MemoryStorage,
   FileStorage,
+  AuthPolicyManager,
+  AuditReportGenerator,
   calculateRemainingDays,
   formatTimestamp,
   generateCredentialNo,

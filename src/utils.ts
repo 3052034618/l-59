@@ -59,6 +59,9 @@ export function getErrorMessage(code: ErrorCode): string {
     [ErrorCode.INVALID_DATA_SIZE]: '数据量必须为正数',
     [ErrorCode.PRECHECK_REQUIRED]: '需要先执行预检查',
     [ErrorCode.STORAGE_ERROR]: '存储操作失败',
+    [ErrorCode.POLICY_VIOLATION]: '违反授权策略',
+    [ErrorCode.POLICY_REQUIRED_FIELD]: '缺少策略要求的必填字段',
+    [ErrorCode.POLICY_SUBJECT_TYPE]: '主体类型不符合策略限制',
     [ErrorCode.UNKNOWN_ERROR]: '未知错误'
   };
   return errorMessages[code] || errorMessages[ErrorCode.UNKNOWN_ERROR];

@@ -31,6 +31,9 @@ export enum ErrorCode {
   INVALID_DATA_SIZE = 'INVALID_DATA_SIZE',
   PRECHECK_REQUIRED = 'PRECHECK_REQUIRED',
   STORAGE_ERROR = 'STORAGE_ERROR',
+  POLICY_VIOLATION = 'POLICY_VIOLATION',
+  POLICY_REQUIRED_FIELD = 'POLICY_REQUIRED_FIELD',
+  POLICY_SUBJECT_TYPE = 'POLICY_SUBJECT_TYPE',
   UNKNOWN_ERROR = 'UNKNOWN_ERROR'
 }
 
@@ -286,4 +289,103 @@ export interface IStorage {
   set(credentialId: string, credential: AuthCredential): Promise<void>;
   delete(credentialId: string): Promise<void>;
   list(): Promise<AuthCredential[]>;
+}
+
+export type PolicyTargetType = 'PRODUCT' | 'SCENE' | 'PROVIDER' | 'CONSUMER' | 'GLOBAL';
+export type PolicyRuleType = 'REQUIRED_FIELD' | 'ALLOWED_SUBJECT_TYPE' | 'DENIED_SUBJECT_TYPE' | 'MAX_DATA_SIZE' | 'MIN_DATA_SIZE' | 'CUSTOM';
+
+export interface PolicyRule {
+  ruleId: string;
+  ruleType: PolicyRuleType;
+  ruleName: string;
+  description?: string;
+  config: Record<string, unknown>;
+  errorCode?: ErrorCode;
+  errorMessage?: string;
+}
+
+export interface AuthPolicy {
+  policyId: string;
+  policyName: string;
+  targetType: PolicyTargetType;
+  targetValue: string;
+  rules: PolicyRule[];
+  enabled: boolean;
+  priority: number;
+  createdAt: number;
+}
+
+export interface PolicyMatchResult {
+  matched: boolean;
+  hitRule?: PolicyRule;
+  policyId?: string;
+  policyName?: string;
+  missingFields?: string[];
+}
+
+export interface ValidationResult {
+  type: ValidationResultType;
+  passed: boolean;
+  message: string;
+  code?: ErrorCode;
+  missingFields?: string[];
+  credentialSnapshot?: Partial<AuthCredential>;
+  auditSummary?: AuditSummary;
+  policyHit?: PolicyMatchResult;
+}
+
+export interface ReportQuery {
+  startTime: number;
+  endTime: number;
+  providerId?: string;
+  consumerId?: string;
+  productId?: string;
+  includePeriodDetails?: boolean;
+  includeRevocationRecords?: boolean;
+  includeRejectionStats?: boolean;
+}
+
+export interface UsageReportItem {
+  dimension: string;
+  dimensionValue: string;
+  dimensionName: string;
+  totalCalls: number;
+  totalDataRows: number;
+  totalDataSizeKB: number;
+  credentialCount: number;
+  revokedCount: number;
+  expiredCount: number;
+  activeCount: number;
+  exhaustedCount: number;
+  rejectionCount: number;
+  currentPeriodUsage?: {
+    periodKey: string;
+    usedCalls: number;
+    usedRows: number;
+    usedSizeKB: number;
+    maxCalls: number;
+    maxRows?: number;
+    maxSizeKB?: number;
+  };
+  periodHistory?: Array<{
+    periodKey: string;
+    usedCalls: number;
+    usedRows: number;
+    usedSizeKB: number;
+  }>;
+}
+
+export interface UsageReport {
+  query: ReportQuery;
+  generatedAt: number;
+  items: UsageReportItem[];
+  summary: {
+    totalCredentials: number;
+    totalCalls: number;
+    totalDataRows: number;
+    totalDataSizeKB: number;
+    totalRevoked: number;
+    totalExpired: number;
+    totalRejections: number;
+  };
 }

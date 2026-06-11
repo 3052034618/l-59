@@ -20,6 +20,7 @@ import {
   ValidationResult,
   ValidationResultType
 } from './types';
+import { AuthPolicyManager } from './policy/AuthPolicyManager';
 import {
   calculateRemainingDays,
   compareIdentity,
@@ -38,9 +39,15 @@ import {
 
 export class CredentialManager {
   private storage: IStorage;
+  private policyManager: AuthPolicyManager;
 
-  constructor(storage: IStorage) {
+  constructor(storage: IStorage, policyManager?: AuthPolicyManager) {
     this.storage = storage;
+    this.policyManager = policyManager || new AuthPolicyManager();
+  }
+
+  getPolicyManager(): AuthPolicyManager {
+    return this.policyManager;
   }
 
   async createAuthorizationOrder(params: CreateOrderParams): Promise<{
@@ -132,20 +139,6 @@ export class CredentialManager {
         return this.buildRejectResult(statusCheck.errorCode!, statusCheck.message!, credential);
       }
 
-      const missingFields: string[] = [];
-      if (!params.purpose) {
-        missingFields.push('purpose');
-      }
-      if (missingFields.length > 0) {
-        return {
-          type: ValidationResultType.PENDING,
-          passed: false,
-          message: '需要补充必要信息',
-          missingFields,
-          credentialSnapshot: this.getCredentialSnapshot(credential)
-        };
-      }
-
       const scopeCheck = this.validateUsageScope(credential, params.productId, params.sceneId);
       if (!scopeCheck.valid) {
         return this.buildRejectResult(scopeCheck.errorCode!, scopeCheck.message!, credential);
@@ -160,16 +153,60 @@ export class CredentialManager {
         );
       }
 
-      const purposeCheck = this.validatePurpose(credential, params.purpose!);
-      if (!purposeCheck.valid) {
-        return this.buildRejectResult(
-          ErrorCode.SCOPE_MISMATCH,
-          '调用目的不在授权范围内',
-          credential
-        );
+      const refreshedCred = await this.refreshPeriodIfNeeded(credential);
+
+      const policyCheck = this.policyManager.validate(params, refreshedCred);
+      if (!policyCheck.matched) {
+        const hitErrorCode = policyCheck.hitRule?.errorCode || ErrorCode.POLICY_VIOLATION;
+        const hitErrorMessage = policyCheck.hitRule?.errorMessage
+          || `${getErrorMessage(hitErrorCode)} - 策略: ${policyCheck.policyName}, 规则: ${policyCheck.hitRule?.ruleName}`;
+
+        if (policyCheck.missingFields && policyCheck.missingFields.length > 0) {
+          return {
+            type: ValidationResultType.PENDING,
+            passed: false,
+            message: hitErrorMessage,
+            code: hitErrorCode,
+            missingFields: policyCheck.missingFields,
+            credentialSnapshot: this.getCredentialSnapshot(refreshedCred),
+            policyHit: policyCheck
+          };
+        }
+
+        return {
+          type: ValidationResultType.REJECT,
+          passed: false,
+          message: hitErrorMessage,
+          code: hitErrorCode,
+          credentialSnapshot: this.getCredentialSnapshot(refreshedCred),
+          policyHit: policyCheck
+        };
       }
 
-      const refreshedCred = await this.refreshPeriodIfNeeded(credential);
+      const hasAnyPolicy = this.policyManager.listPolicies().length > 0;
+      if (!hasAnyPolicy && !params.purpose) {
+        return {
+          type: ValidationResultType.PENDING,
+          passed: false,
+          message: '需要补充必要信息',
+          code: ErrorCode.POLICY_REQUIRED_FIELD,
+          missingFields: ['purpose'],
+          credentialSnapshot: this.getCredentialSnapshot(refreshedCred),
+          policyHit: { matched: true }
+        };
+      }
+
+      if (params.purpose) {
+        const purposeCheck = this.validatePurpose(credential, params.purpose);
+        if (!purposeCheck.valid) {
+          return this.buildRejectResult(
+            ErrorCode.SCOPE_MISMATCH,
+            '调用目的不在授权范围内',
+            refreshedCred
+          );
+        }
+      }
+
       const quotaCheck = this.checkPeriodQuotaSufficiency(
         refreshedCred,
         params.expectedDataRows,
@@ -188,7 +225,8 @@ export class CredentialManager {
         passed: true,
         message: '校验通过',
         credentialSnapshot: this.getCredentialSnapshot(refreshedCred),
-        auditSummary: await this.generateAuditSummaryAsync(refreshedCred) || undefined
+        auditSummary: await this.generateAuditSummaryAsync(refreshedCred) || undefined,
+        policyHit: policyCheck
       };
     } catch (err) {
       return this.buildRejectResult(
@@ -689,6 +727,29 @@ export class CredentialManager {
     error?: SDKError;
   }> {
     try {
+      const callCount = logEntry.callCount;
+      const dataRows = logEntry.dataRows;
+      const dataSizeKB = logEntry.dataSizeKB;
+
+      if (!callCount || callCount <= 0) {
+        return {
+          success: false,
+          error: formatError(ErrorCode.INVALID_CALL_COUNT, getErrorMessage(ErrorCode.INVALID_CALL_COUNT))
+        };
+      }
+      if (dataRows !== undefined && dataRows <= 0) {
+        return {
+          success: false,
+          error: formatError(ErrorCode.INVALID_DATA_ROWS, getErrorMessage(ErrorCode.INVALID_DATA_ROWS))
+        };
+      }
+      if (dataSizeKB !== undefined && dataSizeKB <= 0) {
+        return {
+          success: false,
+          error: formatError(ErrorCode.INVALID_DATA_SIZE, getErrorMessage(ErrorCode.INVALID_DATA_SIZE))
+        };
+      }
+
       const credential = await this.storage.get(credentialId);
       if (!credential) {
         return {
@@ -699,15 +760,11 @@ export class CredentialManager {
 
       const refreshedCred = await this.refreshPeriodIfNeeded(credential);
 
-      const callCount = logEntry.callCount || 1;
-      const dataRows = logEntry.dataRows;
-      const dataSizeKB = logEntry.dataSizeKB;
-
       const maxCalls = refreshedCred.order.quota.maxCalls;
       if (refreshedCred.currentPeriod.usedCalls + callCount > maxCalls) {
         return {
           success: false,
-          error: formatError(ErrorCode.QUOTA_INSUFFICIENT, '追加日志会导致当前周期用量超过上限')
+          error: formatError(ErrorCode.QUOTA_INSUFFICIENT, '追加日志会导致当前周期调用次数超过上限')
         };
       }
 

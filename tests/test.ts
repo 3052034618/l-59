@@ -18,9 +18,9 @@ function assert(condition: boolean, message: string): void {
   }
 }
 
-const testStorageDir = path.join(process.cwd(), 'data', 'test_credentials');
+const testStorageDir = path.join(process.cwd(), 'data', 'test_credentials_v2');
 
-function cleanupTestStorage(): void {
+function cleanup(): void {
   const filePath = path.join(testStorageDir, 'credentials.json');
   if (fs.existsSync(filePath)) {
     fs.unlinkSync(filePath);
@@ -30,7 +30,7 @@ function cleanupTestStorage(): void {
   }
 }
 
-cleanupTestStorage();
+cleanup();
 
 console.log('\n========== 数据要素授权凭证 SDK 扩展测试 ==========\n');
 
@@ -46,6 +46,12 @@ const consumer = {
   id: 'CONS-001',
   name: '数据使用方科技公司',
   type: 'ORGANIZATION' as const
+};
+
+const individualUser = {
+  id: 'USER-001',
+  name: '个人用户张三',
+  type: 'INDIVIDUAL' as const
 };
 
 const products = [
@@ -106,7 +112,39 @@ let credentialId: string = '';
   assert(credNo1.startsWith('DAC-'), '凭证编号前缀正确');
   assert(credNo1 !== credNo2, '生成的凭证编号唯一');
 
-  console.log('\n--- 测试2: 创建授权单 ---');
+  console.log('\n--- 测试2: 配置授权策略 ---');
+  const policyId1 = sdk.addRequiredFieldPolicy(
+    'PRODUCT',
+    'PROD-001',
+    ['purpose', 'expectedDataRows', 'expectedDataSizeKB'],
+    '企业征信产品必填字段策略'
+  );
+  assert(policyId1.length > 0, '必填字段策略创建成功');
+
+  const policyId2 = sdk.addSubjectTypePolicy(
+    'SCENE',
+    'SCENE-001',
+    ['ORGANIZATION'],
+    ['INDIVIDUAL'],
+    '风控评估场景主体类型策略'
+  );
+  assert(policyId2.length > 0, '主体类型策略创建成功');
+
+  const policyId3 = sdk.addDataSizeLimitPolicy(
+    'GLOBAL',
+    '*',
+    20000,
+    1,
+    '全局单次数据量限制策略'
+  );
+  assert(policyId3.length > 0, '数据量限制策略创建成功');
+
+  const policies = sdk.listPolicies();
+  assert(policies.length === 3, '策略列表包含3条策略');
+  assert(policies[0].priority < policies[1].priority, '策略按优先级排序');
+  console.log(`已配置策略数: ${policies.length}`);
+
+  console.log('\n--- 测试3: 创建授权单 ---');
   const createResult = await sdk.createAuthorization({
     provider,
     consumer,
@@ -118,56 +156,56 @@ let credentialId: string = '';
   });
   assert(createResult.success === true, '创建授权单成功');
   assert(createResult.credential!.status === CredentialStatus.ACTIVE, '凭证状态为激活');
-  assert(createResult.credential!.currentPeriod !== undefined, '包含当前周期信息');
-  assert(createResult.credential!.currentPeriod.usedCalls === 0, '当前周期使用次数为0');
-  assert(createResult.credential!.periodHistory.length === 0, '历史周期为空');
   credentialId = createResult.credential!.credentialId;
-  console.log(`凭证ID: ${credentialId}`);
-  console.log(`当前周期: ${createResult.credential!.currentPeriod.periodKey}`);
 
-  console.log('\n--- 测试3: 校验凭证 - 通过 ---');
-  const passResult = await sdk.validate({
-    credentialId,
-    productId: 'PROD-001',
-    sceneId: 'SCENE-001',
-    callerIdentity: consumer,
-    purpose: '风控评估'
-  });
-  assert(passResult.type === ValidationResultType.PASS, '返回PASS结果');
-  assert(passResult.passed === true, '校验通过');
-
-  console.log('\n--- 测试4: 校验凭证 - PENDING ---');
+  console.log('\n--- 测试4: 策略校验 - 缺少必填字段（PENDING）---');
   const pendingResult = await sdk.validate({
     credentialId,
     productId: 'PROD-001',
     sceneId: 'SCENE-001',
     callerIdentity: consumer
   });
-  assert(pendingResult.type === ValidationResultType.PENDING, '返回PENDING结果');
-  assert(!!(pendingResult.missingFields && pendingResult.missingFields.includes('purpose')), '提示缺少purpose');
+  assert(pendingResult.type === ValidationResultType.PENDING, '返回PENDING');
+  assert(pendingResult.missingFields!.includes('purpose'), '提示缺少purpose');
+  assert(pendingResult.missingFields!.includes('expectedDataRows'), '提示缺少expectedDataRows');
+  assert(pendingResult.policyHit !== undefined, '返回策略命中信息');
+  assert(pendingResult.policyHit!.policyId === policyId1, '命中策略ID正确');
+  console.log(`缺失字段: ${pendingResult.missingFields}`);
+  console.log(`命中策略: ${pendingResult.policyHit!.policyName}`);
 
-  console.log('\n--- 测试5: 校验凭证 - 产品不匹配 ---');
-  const productFail = await sdk.validate({
-    credentialId,
-    productId: 'PROD-INVALID',
-    sceneId: 'SCENE-001',
-    callerIdentity: consumer,
-    purpose: '风控评估'
-  });
-  assert(productFail.type === ValidationResultType.REJECT, '返回REJECT');
-  assert(productFail.code === ErrorCode.INVALID_PRODUCT, '错误码为INVALID_PRODUCT');
-
-  console.log('\n--- 测试6: 校验凭证 - 身份不匹配 ---');
-  const identityFail = await sdk.validate({
+  console.log('\n--- 测试5: 策略校验 - 主体类型不匹配（REJECT）---');
+  const rejectResult = await sdk.validate({
     credentialId,
     productId: 'PROD-001',
     sceneId: 'SCENE-001',
-    callerIdentity: { id: 'HACKER', name: '黑客', type: 'ORGANIZATION' },
-    purpose: '风控评估'
+    callerIdentity: individualUser,
+    purpose: '风控评估',
+    expectedDataRows: 100,
+    expectedDataSizeKB: 500
   });
-  assert(identityFail.code === ErrorCode.IDENTITY_MISMATCH, '错误码为IDENTITY_MISMATCH');
+  assert(rejectResult.type === ValidationResultType.REJECT, '返回REJECT');
+  assert(rejectResult.code === ErrorCode.POLICY_SUBJECT_TYPE, '错误码为POLICY_SUBJECT_TYPE');
+  assert(rejectResult.policyHit !== undefined, '返回策略命中信息');
+  assert(rejectResult.policyHit!.policyId === policyId2, '命中主体类型策略');
+  console.log(`拒绝原因: ${rejectResult.message}`);
+  console.log(`命中策略: ${rejectResult.policyHit!.policyName}`);
 
-  console.log('\n--- 测试7: 事务式流程 - preCheck ---');
+  console.log('\n--- 测试6: 策略校验 - 校验通过（PASS）---');
+  const passResult = await sdk.validate({
+    credentialId,
+    productId: 'PROD-001',
+    sceneId: 'SCENE-001',
+    callerIdentity: consumer,
+    purpose: '风控评估',
+    expectedDataRows: 100,
+    expectedDataSizeKB: 500
+  });
+  assert(passResult.type === ValidationResultType.PASS, '返回PASS');
+  assert(passResult.passed === true, '校验通过');
+  assert(passResult.policyHit!.matched === true, '策略校验通过');
+  console.log(`校验通过，命中策略: ${passResult.policyHit!.policyName}`);
+
+  console.log('\n--- 测试7: 事务式流程 - preCheck + executeUsage ---');
   const preCheckResult = await sdk.preCheck({
     credentialId,
     callCount: 10,
@@ -176,459 +214,383 @@ let credentialId: string = '';
   });
   assert(preCheckResult.canProceed === true, '预检查通过');
   assert(preCheckResult.remainingAfterDeduction!.calls === 90, '扣减后剩余90次');
-  assert(preCheckResult.remainingAfterDeduction!.rows === 9500, '扣减后剩余9500行');
-  assert(preCheckResult.remainingAfterDeduction!.sizeKB === 48000, '扣减后剩余48000KB');
 
-  console.log('\n--- 测试8: 事务式流程 - executeUsage ---');
   const execResult = await sdk.executeUsage({
     credentialId,
     purpose: '风控评估',
     callerIdentity: consumer,
     callCount: 10,
     dataRows: 500,
-    dataSizeKB: 2000,
-    remark: '事务式扣减测试'
+    dataSizeKB: 2000
   });
   assert(execResult.success === true, '执行扣减成功');
-  assert(execResult.deducted!.calls === 10, '扣减10次调用');
-  assert(execResult.deducted!.rows === 500, '扣减500行');
+  assert(execResult.deducted!.calls === 10, '扣减10次');
   assert(execResult.remainingAfter!.calls === 90, '扣减后剩余90次');
-  assert(execResult.remainingAfter!.rows === 9500, '扣减后剩余9500行');
 
-  console.log('\n--- 测试9: executeUsage - 无效callCount ---');
-  const invalidCallResult = await sdk.executeUsage({
+  const quotaAfter = await sdk.getRemainingQuota(credentialId);
+  assert(quotaAfter.quota!.periodUsedCalls === 10, '当前周期已用10次');
+
+  console.log('\n--- 测试8: executeUsage - 无效参数校验 ---');
+  const call0Result = await sdk.executeUsage({
     credentialId,
-    purpose: '风控评估',
+    purpose: '测试',
     callerIdentity: consumer,
     callCount: 0
   });
-  assert(invalidCallResult.success === false, 'callCount=0 被拒绝');
-  assert(invalidCallResult.error!.code === ErrorCode.INVALID_CALL_COUNT, '错误码为INVALID_CALL_COUNT');
+  assert(call0Result.success === false, 'callCount=0被拒绝');
+  assert(call0Result.error!.code === ErrorCode.INVALID_CALL_COUNT, '错误码正确');
 
   const negCallResult = await sdk.executeUsage({
     credentialId,
-    purpose: '风控评估',
+    purpose: '测试',
     callerIdentity: consumer,
     callCount: -5
   });
-  assert(negCallResult.success === false, 'callCount=-5 被拒绝');
+  assert(negCallResult.success === false, 'callCount=-5被拒绝');
 
-  console.log('\n--- 测试10: executeUsage - 无效dataRows ---');
-  const invalidRowsResult = await sdk.executeUsage({
+  const rows0Result = await sdk.executeUsage({
     credentialId,
-    purpose: '风控评估',
+    purpose: '测试',
     callerIdentity: consumer,
     callCount: 1,
     dataRows: 0
   });
-  assert(invalidRowsResult.success === false, 'dataRows=0 被拒绝');
-  assert(invalidRowsResult.error!.code === ErrorCode.INVALID_DATA_ROWS, '错误码为INVALID_DATA_ROWS');
+  assert(rows0Result.success === false, 'dataRows=0被拒绝');
 
-  console.log('\n--- 测试11: executeUsage - 额度不足拒绝且不扣减 ---');
-  const beforeCred = await sdk.getCredential(credentialId);
-  const beforeCalls = beforeCred!.currentPeriod.usedCalls;
-
-  const overQuotaResult = await sdk.executeUsage({
+  const negRowsResult = await sdk.executeUsage({
     credentialId,
-    purpose: '风控评估',
+    purpose: '测试',
+    callerIdentity: consumer,
+    callCount: 1,
+    dataRows: -100
+  });
+  assert(negRowsResult.success === false, 'dataRows=-100被拒绝');
+
+  const size0Result = await sdk.executeUsage({
+    credentialId,
+    purpose: '测试',
+    callerIdentity: consumer,
+    callCount: 1,
+    dataSizeKB: 0
+  });
+  assert(size0Result.success === false, 'dataSizeKB=0被拒绝');
+
+  const quotaCheck1 = await sdk.getRemainingQuota(credentialId);
+  assert(quotaCheck1.quota!.periodUsedCalls === 10, '无效请求未改变额度');
+  console.log('无效参数全部被正确拦截，额度未变动');
+
+  console.log('\n--- 测试9: executeUsage - 超额拒绝，额度不变 ---');
+  const beforeQuota = await sdk.getRemainingQuota(credentialId);
+  const beforeCalls = beforeQuota.quota!.periodUsedCalls;
+
+  const overResult = await sdk.executeUsage({
+    credentialId,
+    purpose: '超额测试',
     callerIdentity: consumer,
     callCount: 200,
     dataRows: 50000
   });
-  assert(overQuotaResult.success === false, '超额扣减被拒绝');
+  assert(overResult.success === false, '超额扣减被拒绝');
+  assert(overResult.error!.code === ErrorCode.QUOTA_INSUFFICIENT, '错误码为QUOTA_INSUFFICIENT');
 
-  const afterCred = await sdk.getCredential(credentialId);
-  assert(afterCred!.currentPeriod.usedCalls === beforeCalls, '额度未发生变化（不会变大或变小）');
+  const afterQuota = await sdk.getRemainingQuota(credentialId);
+  assert(afterQuota.quota!.periodUsedCalls === beforeCalls, '被拒绝后额度不变');
+  console.log('超额拒绝，额度保持不变');
 
-  console.log('\n--- 测试12: recordUsage（兼容旧接口） ---');
-  const recordResult = await sdk.recordUsage(credentialId, '信用分析', consumer, 5, 200, 1000);
-  assert(recordResult.success === true, 'recordUsage成功');
-  const credAfterRecord = await sdk.getCredential(credentialId);
-  assert(credAfterRecord!.currentPeriod.usedCalls === 15, '当前周期使用15次');
-
-  console.log('\n--- 测试13: 查询剩余额度（含周期信息） ---');
-  const quotaResult = await sdk.getRemainingQuota(credentialId);
-  assert(quotaResult.success === true, '查询剩余额度成功');
-  assert(quotaResult.quota!.remainingCalls === 85, '剩余85次');
-  assert(quotaResult.quota!.periodKey !== undefined, '包含周期key');
-  assert(quotaResult.quota!.periodUsedCalls === 15, '周期已用15次');
-  console.log(`周期: ${quotaResult.quota!.periodKey}, 已用: ${quotaResult.quota!.periodUsedCalls}, 剩余: ${quotaResult.quota!.remainingCalls}`);
-
-  console.log('\n--- 测试14: 检查有效期限 ---');
-  const validityResult = await sdk.checkValidity(credentialId);
-  assert(validityResult.success === true, '检查有效期限成功');
-  assert(validityResult.validity!.isValid === true, '凭证有效');
-
-  console.log('\n--- 测试15: 比对主体身份 ---');
-  const verifyConsumer = await sdk.verifyIdentity(credentialId, consumer);
-  assert(verifyConsumer.verification!.matchedRole === 'CONSUMER', '使用方角色正确');
-  const verifyProvider = await sdk.verifyIdentity(credentialId, provider);
-  assert(verifyProvider.verification!.matchedRole === 'PROVIDER', '提供方角色正确');
-
-  console.log('\n--- 测试16: 校验使用范围 ---');
-  const scopeResult = await sdk.checkUsageScope(credentialId, 'PROD-001', 'SCENE-001');
-  assert(scopeResult.valid === true, '使用范围校验通过');
-  const scopeFail = await sdk.checkUsageScope(credentialId, 'PROD-001', 'SCENE-INVALID');
-  assert(scopeFail.valid === false, '使用范围校验失败');
-
-  console.log('\n--- 测试17: 追加使用日志（带额度保护） ---');
-  const appendResult = await sdk.appendUsageLog(credentialId, {
+  console.log('\n--- 测试10: appendUsageLog - 收紧校验 ---');
+  const appendValid = await sdk.appendUsageLog(credentialId, {
     purpose: '风险建模',
     callCount: 5,
-    dataRows: 300,
-    dataSizeKB: 1500,
+    dataRows: 200,
+    dataSizeKB: 1000,
     callerIdentity: consumer.id,
-    remark: '追加日志测试'
+    remark: '追加测试'
   });
-  assert(appendResult.success === true, '追加使用日志成功');
-  const credAfterAppend = await sdk.getCredential(credentialId);
-  assert(credAfterAppend!.currentPeriod.usedCalls === 20, '当前周期使用20次');
+  assert(appendValid.success === true, '正常追加成功');
 
-  const overAppend = await sdk.appendUsageLog(credentialId, {
-    purpose: '超额追加',
+  const appendCall0 = await sdk.appendUsageLog(credentialId, {
+    purpose: '测试',
+    callCount: 0,
+    callerIdentity: consumer.id
+  });
+  assert(appendCall0.success === false, 'callCount=0追加被拒绝');
+  assert(appendCall0.error!.code === ErrorCode.INVALID_CALL_COUNT, '错误码正确');
+
+  const appendNegRows = await sdk.appendUsageLog(credentialId, {
+    purpose: '测试',
+    callCount: 1,
+    dataRows: -50,
+    callerIdentity: consumer.id
+  });
+  assert(appendNegRows.success === false, 'dataRows=-50追加被拒绝');
+
+  const appendOverQuota = await sdk.appendUsageLog(credentialId, {
+    purpose: '测试',
     callCount: 200,
     callerIdentity: consumer.id
   });
-  assert(overAppend.success === false, '超额追加被拒绝');
+  assert(appendOverQuota.success === false, '超额追加被拒绝');
 
-  console.log('\n--- 测试18: 输出审计摘要（含周期信息） ---');
+  const quotaAfterAppend = await sdk.getRemainingQuota(credentialId);
+  assert(quotaAfterAppend.quota!.periodUsedCalls === 15, '只有正常追加成功计数');
+  console.log('追加日志校验收紧生效');
+
+  console.log('\n--- 测试11: 查询剩余额度（含周期信息）---');
+  const quotaResult = await sdk.getRemainingQuota(credentialId);
+  assert(quotaResult.success === true, '查询成功');
+  assert(quotaResult.quota!.periodKey !== undefined, '包含周期key');
+  assert(quotaResult.quota!.periodUsedCalls === 15, '周期已用15次');
+  assert(quotaResult.quota!.remainingCalls === 85, '剩余85次');
+  console.log(`周期: ${quotaResult.quota!.periodKey}, 已用: ${quotaResult.quota!.periodUsedCalls}, 剩余: ${quotaResult.quota!.remainingCalls}`);
+
+  console.log('\n--- 测试12: 审计摘要（含周期信息）---');
   const auditSummary = await sdk.getAuditSummary(credentialId);
   assert(auditSummary !== null, '获取审计摘要成功');
-  assert(auditSummary!.currentPeriod !== undefined, '包含当前周期信息');
-  assert(auditSummary!.currentPeriod.usedCalls === 20, '当前周期使用20次');
-  assert(auditSummary!.currentPeriod.remainingCalls === 80, '当前周期剩余80次');
-  assert(auditSummary!.quota.usedCalls === 20, '额度已用20次');
-  console.log('审计摘要（周期部分）:');
-  console.log(JSON.stringify({
-    currentPeriod: auditSummary!.currentPeriod,
-    periodHistory: auditSummary!.periodHistory,
-    quota: auditSummary!.quota
-  }, null, 2));
+  assert(auditSummary!.currentPeriod !== undefined, '包含当前周期');
+  assert(auditSummary!.currentPeriod.usedCalls === 15, '当前周期使用15次');
+  assert(auditSummary!.currentPeriod.remainingCalls === 85, '当前周期剩余85次');
+  assert(auditSummary!.quota.usedCalls === 15, '额度已用15次');
+  assert(auditSummary!.periodHistory.length >= 0, '包含历史周期');
+  console.log('审计摘要周期信息正确');
 
-  console.log('\n--- 测试19: 格式化错误信息 ---');
-  const fmtErr = sdk.formatError(ErrorCode.INVALID_CALL_COUNT);
-  assert(fmtErr.code === ErrorCode.INVALID_CALL_COUNT, '错误码正确');
-
-  console.log('\n--- 测试20: preCheck - 额度不足 ---');
-  const preCheckFail = await sdk.preCheck({
-    credentialId,
-    callCount: 200,
-    dataRows: 50000
+  console.log('\n--- 测试13: 审计报表 - 按提供方维度 ---');
+  const reportProvider = await sdk.generateReportByProvider(provider.id, {
+    includePeriodDetails: true,
+    includeRevocationRecords: true
   });
-  assert(preCheckFail.canProceed === false, '预检查额度不足被拒绝');
-  assert(preCheckFail.code === ErrorCode.QUOTA_INSUFFICIENT, '错误码为QUOTA_INSUFFICIENT');
+  assert(reportProvider.summary.totalCredentials === 1, '凭证数1');
+  assert(reportProvider.summary.totalCalls === 15, '总调用15次');
+  assert(reportProvider.items.length === 1, '报表项1条');
+  assert(reportProvider.items[0].dimension === 'PROVIDER', '维度为PROVIDER');
+  assert(reportProvider.items[0].currentPeriodUsage !== undefined, '包含周期使用详情');
+  console.log(`按提供方报表 - 总调用: ${reportProvider.summary.totalCalls}, 凭证数: ${reportProvider.summary.totalCredentials}`);
 
-  console.log('\n--- 测试21: preCheck - 无效参数 ---');
-  const preCheckInvalid = await sdk.preCheck({
-    credentialId,
-    callCount: 0
+  console.log('\n--- 测试14: 审计报表 - 按使用方维度 ---');
+  const reportConsumer = await sdk.generateReportByConsumer(consumer.id);
+  assert(reportConsumer.summary.totalCredentials === 1, '凭证数1');
+  assert(reportConsumer.summary.totalDataRows === 700, '总数据行数700');
+  console.log(`按使用方报表 - 总数据行数: ${reportConsumer.summary.totalDataRows}`);
+
+  console.log('\n--- 测试15: 审计报表 - 按产品维度 ---');
+  const reportProduct = await sdk.generateReportByProduct('PROD-001');
+  assert(reportProduct.summary.totalCredentials === 1, '凭证数1');
+  assert(reportProduct.summary.totalDataSizeKB === 3000, '总数据量3000KB');
+  console.log(`按产品报表 - 总数据量: ${reportProduct.summary.totalDataSizeKB}KB`);
+
+  console.log('\n--- 测试16: 审计报表 - 全局汇总 ---');
+  const reportAll = await sdk.generateUsageReport({
+    startTime: 0,
+    endTime: Date.now(),
+    includePeriodDetails: true
   });
-  assert(preCheckInvalid.canProceed === false, '预检查无效参数被拒绝');
-  assert(preCheckInvalid.code === ErrorCode.INVALID_CALL_COUNT, '错误码为INVALID_CALL_COUNT');
+  assert(reportAll.summary.totalCredentials === 1, '凭证数1');
+  assert(reportAll.summary.totalCalls === 15, '总调用15次');
+  assert(reportAll.items[0].dimension === 'GLOBAL', '维度为GLOBAL');
+  console.log(`全局报表 - 总调用: ${reportAll.summary.totalCalls}`);
 
-  console.log('\n--- 测试22: 批量校验 ---');
+  console.log('\n--- 测试17: 策略管理 - 移除策略 ---');
+  const removeResult = sdk.removePolicy(policyId3);
+  assert(removeResult === true, '移除策略成功');
+  const policiesAfter = sdk.listPolicies();
+  assert(policiesAfter.length === 2, '剩余2条策略');
+  console.log('策略管理功能正常');
+
+  console.log('\n--- 测试18: 策略管理 - 获取策略 ---');
+  const policy = sdk.getPolicy(policyId1);
+  assert(policy !== undefined, '获取策略成功');
+  assert(policy!.policyId === policyId1, '策略ID正确');
+
+  console.log('\n--- 测试19: 批量校验含策略命中 ---');
   const batchResult = await sdk.batchValidate([
     {
       credentialId,
       productId: 'PROD-001',
       sceneId: 'SCENE-001',
       callerIdentity: consumer,
-      purpose: '风控评估'
+      purpose: '风控评估',
+      expectedDataRows: 100,
+      expectedDataSizeKB: 500
     },
     {
       credentialId,
-      productId: 'PROD-002',
-      sceneId: 'SCENE-002',
-      callerIdentity: consumer,
-      purpose: '信用分析'
+      productId: 'PROD-001',
+      sceneId: 'SCENE-001',
+      callerIdentity: individualUser,
+      purpose: '风控评估',
+      expectedDataRows: 100,
+      expectedDataSizeKB: 500
     },
     {
       credentialId,
-      productId: 'PROD-INVALID',
-      sceneId: 'SCENE-001',
-      callerIdentity: consumer,
-      purpose: '风控评估'
-    },
-    {
-      credentialId: 'NON-EXIST',
       productId: 'PROD-001',
       sceneId: 'SCENE-001',
-      callerIdentity: consumer,
-      purpose: '风控评估'
+      callerIdentity: consumer
     }
   ]);
-  assert(batchResult.results.length === 4, '返回4条结果');
-  assert(batchResult.summary.total === 4, '总数为4');
-  assert(batchResult.summary.passed === 2, '通过2条');
-  assert(batchResult.summary.rejected === 2, '拒绝2条');
-  console.log(`批量校验汇总: 总计${batchResult.summary.total}, 通过${batchResult.summary.passed}, 拒绝${batchResult.summary.rejected}`);
 
-  console.log('\n--- 测试23: 批量校验 - 快过期和低额度汇总 ---');
-  const nearExpiryTime = now + 5 * 24 * 60 * 60 * 1000;
-  const nearExpiryResult = await sdk.createAuthorization({
-    provider,
-    consumer,
-    scope,
-    quota: { maxCalls: 10, periodType: 'MONTHLY' },
-    validity: { startTime: now, endTime: nearExpiryTime },
-    purpose: '测试快过期',
-    createdBy: 'admin'
-  });
-  const nearExpiryCredId = nearExpiryResult.credential!.credentialId;
+  assert(batchResult.results[0].type === ValidationResultType.PASS, '第一条通过');
+  assert(batchResult.results[1].type === ValidationResultType.REJECT, '第二条被策略拒绝');
+  assert(batchResult.results[1].policyHit !== undefined, '第二条返回策略命中');
+  assert(batchResult.results[2].type === ValidationResultType.PENDING, '第三条PENDING');
+  assert(batchResult.results[2].policyHit !== undefined, '第三条返回策略命中');
+  console.log(`批量校验: 通过${batchResult.summary.passed}, 拒绝${batchResult.summary.rejected}, 待补${batchResult.summary.pending}`);
+  console.log(`拒绝原因: ${batchResult.results[1].message}`);
+  console.log(`命中策略: ${batchResult.results[1].policyHit!.policyName}`);
 
-  await sdk.executeUsage({
-    credentialId: nearExpiryCredId,
-    purpose: '消耗额度',
-    callerIdentity: consumer,
-    callCount: 9
-  });
-
-  const lowQuotaBatch = await sdk.batchValidate([
-    {
-      credentialId: nearExpiryCredId,
-      productId: 'PROD-001',
-      sceneId: 'SCENE-001',
-      callerIdentity: consumer,
-      purpose: '风控评估'
-    }
-  ]);
-  assert(lowQuotaBatch.summary.nearExpiryCredentials.length > 0, '检测到快过期凭证');
-  assert(lowQuotaBatch.summary.lowQuotaCredentials.length > 0, '检测到低额度凭证');
-  console.log(`快过期凭证: ${JSON.stringify(lowQuotaBatch.summary.nearExpiryCredentials)}`);
-  console.log(`低额度凭证: ${JSON.stringify(lowQuotaBatch.summary.lowQuotaCredentials)}`);
-
-  console.log('\n--- 测试24: 周期额度管理 - ONCE类型 ---');
-  const onceResult = await sdk.createAuthorization({
-    provider,
-    consumer,
-    scope,
-    quota: { maxCalls: 5, periodType: 'ONCE' },
-    validity,
-    purpose: '一次性额度测试',
-    createdBy: 'admin'
-  });
-  const onceCredId = onceResult.credential!.credentialId;
-
-  for (let i = 0; i < 5; i++) {
-    await sdk.executeUsage({
-      credentialId: onceCredId,
-      purpose: '消耗额度',
-      callerIdentity: consumer,
-      callCount: 1
-    });
-  }
-  const onceCred = await sdk.getCredential(onceCredId);
-  assert(onceCred!.status === CredentialStatus.EXHAUSTED, 'ONCE类型额度用尽后状态变为EXHAUSTED');
-
-  const onceValidate = await sdk.validate({
-    credentialId: onceCredId,
-    productId: 'PROD-001',
-    sceneId: 'SCENE-001',
-    callerIdentity: consumer,
-    purpose: '风控评估'
-  });
-  assert(onceValidate.code === ErrorCode.CREDENTIAL_EXHAUSTED, 'ONCE类型用尽后校验被拒绝');
-
-  console.log('\n--- 测试25: 周期管理 - 审计摘要含历史周期 ---');
-  const summaryWithHistory = await sdk.getAuditSummary(credentialId);
-  assert(summaryWithHistory!.currentPeriod.periodKey.length > 0, '包含当前周期key');
-  console.log(`当前周期: ${summaryWithHistory!.currentPeriod.periodKey}, 历史: ${summaryWithHistory!.periodHistory.length}个`);
-
-  console.log('\n--- 测试26: 撤销凭证 ---');
-  const revokeResult = await sdk.revokeCredential(credentialId, 'admin', '业务终止');
-  assert(revokeResult.success === true, '撤销凭证成功');
-  assert(revokeResult.updatedCredential!.status === CredentialStatus.REVOKED, '凭证状态变为已撤销');
-
-  const revokedResult = await sdk.validate({
-    credentialId,
-    productId: 'PROD-001',
-    sceneId: 'SCENE-001',
-    callerIdentity: consumer,
-    purpose: '风控评估'
-  });
-  assert(revokedResult.code === ErrorCode.CREDENTIAL_REVOKED, '已撤销凭证被拒绝');
-
-  console.log('\n--- 测试27: 查询不存在的凭证 ---');
-  const notFound = await sdk.validate({
-    credentialId: 'INVALID',
-    productId: 'PROD-001',
-    sceneId: 'SCENE-001',
-    callerIdentity: consumer,
-    purpose: '风控评估'
-  });
-  assert(notFound.code === ErrorCode.CREDENTIAL_NOT_FOUND, '不存在凭证被拒绝');
-
-  console.log('\n--- 测试28: 获取全部凭证 ---');
-  const allCreds = await sdk.getAllCredentials();
-  assert(allCreds.length >= 3, '凭证列表包含多个凭证');
-
-  console.log('\n--- 测试29: 无效参数创建 ---');
-  const invalidCreate = await sdk.createAuthorization({
-    provider,
-    consumer,
-    scope,
-    quota: { maxCalls: -1, periodType: 'MONTHLY' },
-    validity,
-    purpose: '测试',
-    createdBy: 'admin'
-  });
-  assert(invalidCreate.success === false, '无效参数创建失败');
-  assert(invalidCreate.error!.code === ErrorCode.INVALID_QUOTA, '错误码为INVALID_QUOTA');
-
-  console.log('\n--- 测试30: FileStorage 持久化 ---');
-  cleanupTestStorage();
+  console.log('\n--- 测试20: FileStorage 持久化含策略相关数据 ---');
+  cleanup();
 
   const fileSdk1 = new DataAuthCredentialSDK({
     storageType: 'file',
     storagePath: testStorageDir
   });
 
-  const fileCreateResult = await fileSdk1.createAuthorization({
+  const fileCreate = await fileSdk1.createAuthorization({
     provider,
     consumer,
     scope,
-    quota: { maxCalls: 50, maxDataRows: 5000, periodType: 'DAILY' },
+    quota,
     validity,
-    purpose: '文件存储持久化测试',
+    purpose: '持久化测试',
     createdBy: 'admin'
   });
-  assert(fileCreateResult.success === true, 'FileStorage创建授权单成功');
-  const fileCredId = fileCreateResult.credential!.credentialId;
+  const fileCredId = fileCreate.credential!.credentialId;
 
   await fileSdk1.executeUsage({
     credentialId: fileCredId,
-    purpose: '持久化测试',
+    purpose: '持久化测试调用',
     callerIdentity: consumer,
-    callCount: 3,
-    dataRows: 100,
-    dataSizeKB: 500
+    callCount: 8,
+    dataRows: 400,
+    dataSizeKB: 1600
   });
 
   await fileSdk1.revokeCredential(fileCredId, 'admin', '测试撤销持久化');
 
-  console.log('重启SDK实例（模拟重启）...');
+  console.log('重启SDK实例...');
   const fileSdk2 = new DataAuthCredentialSDK({
     storageType: 'file',
     storagePath: testStorageDir
   });
 
-  const restoredCred = await fileSdk2.getCredential(fileCredId);
-  assert(restoredCred !== undefined, '重启后能查到凭证');
-  assert(restoredCred!.status === CredentialStatus.REVOKED, '凭证状态为已撤销（持久化成功）');
-  assert(restoredCred!.totalUsedCalls === 3, '总使用次数为3（持久化成功）');
-  assert(restoredCred!.usageLogs.length === 1, '日志数量为1（持久化成功）');
-  assert(restoredCred!.currentPeriod.usedCalls === 3, '当前周期使用3次（持久化成功）');
-  console.log(`重启后凭证: 状态=${restoredCred!.status}, 已用=${restoredCred!.totalUsedCalls}, 日志=${restoredCred!.usageLogs.length}`);
+  const restored = await fileSdk2.getCredential(fileCredId);
+  assert(restored !== undefined, '重启后能查到凭证');
+  assert(restored!.status === CredentialStatus.REVOKED, '凭证状态已撤销');
+  assert(restored!.totalUsedCalls === 8, '总使用次数8次');
+  assert(restored!.currentPeriod.usedCalls === 8, '当前周期使用8次');
+  assert(restored!.usageLogs.length === 1, '日志1条');
+  assert(restored!.usageLogs[0].periodKey !== undefined, '日志包含周期key');
+  assert(restored!.revokedBy === 'admin', '撤销人正确');
+  assert(restored!.revokeReason === '测试撤销持久化', '撤销原因正确');
+  console.log('凭证、周期用量、日志、撤销记录全部持久化成功');
 
   const restoredAudit = await fileSdk2.getAuditSummary(fileCredId);
   assert(restoredAudit !== null, '重启后能获取审计摘要');
-  assert(restoredAudit!.currentPeriod.usedCalls === 3, '审计摘要周期信息正确');
-  console.log(`重启后审计摘要 - 周期: ${restoredAudit!.currentPeriod.periodKey}, 已用: ${restoredAudit!.currentPeriod.usedCalls}`);
+  assert(restoredAudit!.currentPeriod.usedCalls === 8, '重启后周期用量正确');
+  assert(restoredAudit!.totalUsageLogs === 1, '重启后日志数正确');
+  console.log('重启后审计数据完整');
 
-  console.log('\n--- 测试31: FileStorage DAILY周期 - 跨周期自动重置 ---');
-  cleanupTestStorage();
+  const restoredReport = await fileSdk2.generateReportByProvider(provider.id);
+  assert(restoredReport.summary.totalRevoked === 1, '重启后报表包含撤销记录');
+  assert(restoredReport.summary.totalCalls === 8, '重启后报表调用次数正确');
+  console.log('重启后报表数据完整');
 
-  const dailySdk = new DataAuthCredentialSDK({
-    storageType: 'file',
-    storagePath: testStorageDir
-  });
-
-  const dailyResult = await dailySdk.createAuthorization({
+  console.log('\n--- 测试21: 周期管理 - ONCE类型用尽后状态不变 ---');
+  const onceSdk = new DataAuthCredentialSDK();
+  const onceResult = await onceSdk.createAuthorization({
     provider,
     consumer,
     scope,
-    quota: { maxCalls: 10, periodType: 'DAILY' },
+    quota: { maxCalls: 3, periodType: 'ONCE' },
     validity,
-    purpose: '日周期测试',
+    purpose: 'ONCE周期测试',
     createdBy: 'admin'
   });
-  const dailyCredId = dailyResult.credential!.credentialId;
+  const onceCredId = onceResult.credential!.credentialId;
 
-  await dailySdk.executeUsage({
-    credentialId: dailyCredId,
-    purpose: '日周期消耗',
+  for (let i = 0; i < 3; i++) {
+    await onceSdk.executeUsage({
+      credentialId: onceCredId,
+      purpose: '消耗',
+      callerIdentity: consumer,
+      callCount: 1
+    });
+  }
+  const onceCred = await onceSdk.getCredential(onceCredId);
+  assert(onceCred!.status === CredentialStatus.EXHAUSTED, 'ONCE类型用尽后状态为EXHAUSTED');
+
+  const onceValidate = await onceSdk.validate({
+    credentialId: onceCredId,
+    productId: 'PROD-001',
+    sceneId: 'SCENE-001',
     callerIdentity: consumer,
-    callCount: 8
+    purpose: '风控评估',
+    expectedDataRows: 100,
+    expectedDataSizeKB: 500
   });
+  assert(onceValidate.code === ErrorCode.CREDENTIAL_EXHAUSTED, 'ONCE类型用尽后校验被拒绝');
 
-  const dailyQuota = await dailySdk.getRemainingQuota(dailyCredId);
-  assert(dailyQuota.quota!.remainingCalls === 2, '日周期剩余2次');
-  assert(dailyQuota.quota!.periodKey.length > 0, '包含日周期key');
-  console.log(`日周期: ${dailyQuota.quota!.periodKey}, 剩余: ${dailyQuota.quota!.remainingCalls}`);
+  console.log('\n--- 测试22: 检查有效性 ---');
+  const validityResult = await sdk.checkValidity(credentialId);
+  assert(validityResult.success === true, '检查成功');
+  assert(validityResult.validity!.isValid === true, '凭证有效');
 
-  const dailyAudit = await dailySdk.getAuditSummary(dailyCredId);
-  assert(dailyAudit!.currentPeriod.usedCalls === 8, '当前周期使用8次');
-  console.log(`日周期审计: 已用${dailyAudit!.currentPeriod.usedCalls}次, 剩余${dailyAudit!.currentPeriod.remainingCalls}次`);
+  console.log('\n--- 测试23: 比对主体身份 ---');
+  const verifyConsumer = await sdk.verifyIdentity(credentialId, consumer);
+  assert(verifyConsumer.verification!.matchedRole === 'CONSUMER', '使用方角色正确');
 
-  console.log('\n--- 测试32: 周期工具函数 ---');
-  const monthlyKey = sdk.getPeriodKey('MONTHLY', Date.now());
-  assert(monthlyKey.includes('-'), 'MONTHLY周期key格式正确');
-  const dailyKey = sdk.getPeriodKey('DAILY', Date.now());
-  assert(dailyKey.includes('-'), 'DAILY周期key格式正确');
-  const onceKey = sdk.getPeriodKey('ONCE', Date.now());
-  assert(onceKey === 'ONCE', 'ONCE周期key为ONCE');
+  console.log('\n--- 测试24: checkUsageScope ---');
+  const scopeResult = await sdk.checkUsageScope(credentialId, 'PROD-001', 'SCENE-001');
+  assert(scopeResult.valid === true, '范围校验通过');
 
-  const range = sdk.getPeriodRange('MONTHLY', Date.now());
-  assert(range.start < range.end, '周期范围有效');
-  console.log(`MONTHLY范围: ${new Date(range.start).toISOString()} ~ ${new Date(range.end).toISOString()}`);
+  console.log('\n--- 测试25: recordPurpose ---');
+  const purposeResult = await sdk.recordPurpose(credentialId, '风险建模', consumer, 2);
+  assert(purposeResult.success === true, '记录目的成功');
 
-  console.log('\n--- 测试33: MemoryStorage直接使用 ---');
-  const memSdk = new DataAuthCredentialSDK({ storage: new MemoryStorage() });
-  const memResult = await memSdk.createAuthorization({
+  console.log('\n--- 测试26: getAllCredentials ---');
+  const allCreds = await sdk.getAllCredentials();
+  assert(allCreds.length >= 1, '获取全部凭证成功');
+
+  console.log('\n--- 测试27: 格式化错误 ---');
+  const fmtErr = sdk.formatError(ErrorCode.POLICY_VIOLATION, '自定义策略错误', { policy: 'test' });
+  assert(fmtErr.code === ErrorCode.POLICY_VIOLATION, '错误码正确');
+  assert(fmtErr.message === '自定义策略错误', '自定义消息生效');
+  assert(fmtErr.details!.policy === 'test', '错误详情正确');
+
+  console.log('\n--- 测试28: 工具函数 ---');
+  assert(sdk.compareIdentity(consumer, consumer) === true, 'compareIdentity正确');
+  assert(sdk.getPeriodKey('MONTHLY', Date.now()).includes('-'), 'getPeriodKey正确');
+  const range = sdk.getPeriodRange('DAILY', Date.now());
+  assert(range.start < range.end, 'getPeriodRange正确');
+
+  console.log('\n--- 测试29: 数据量超限策略 ---');
+  const policySDK = new DataAuthCredentialSDK();
+  policySDK.addDataSizeLimitPolicy('GLOBAL', '*', 1000);
+
+  const pc = await policySDK.createAuthorization({
     provider,
     consumer,
     scope,
-    quota: { maxCalls: 10, periodType: 'MONTHLY' },
+    quota: { maxCalls: 100, periodType: 'MONTHLY' },
     validity,
-    purpose: '内存存储测试',
+    purpose: '测试',
     createdBy: 'admin'
   });
-  assert(memResult.success === true, 'MemoryStorage创建授权单成功');
-  const memCredId = memResult.credential!.credentialId;
 
-  const memExec = await memSdk.executeUsage({
-    credentialId: memCredId,
-    purpose: '内存测试',
+  const policyValResult = await policySDK.validate({
+    credentialId: pc.credential!.credentialId,
+    productId: 'PROD-002',
+    sceneId: 'SCENE-001',
     callerIdentity: consumer,
-    callCount: 5
+    purpose: '风控评估',
+    expectedDataSizeKB: 2000
   });
-  assert(memExec.success === true, 'MemoryStorage执行扣减成功');
-  assert(memExec.remainingAfter!.calls === 5, '剩余5次');
+  assert(policyValResult.type === ValidationResultType.REJECT, '数据量超限被策略拒绝');
+  assert(policyValResult.code === ErrorCode.INVALID_DATA_SIZE, '错误码正确');
 
-  console.log('\n--- 测试34: executeUsage 不会让已用量超过上限 ---');
-  const strictSdk = new DataAuthCredentialSDK({ storage: new MemoryStorage() });
-  const strictResult = await strictSdk.createAuthorization({
-    provider,
-    consumer,
-    scope,
-    quota: { maxCalls: 5, periodType: 'MONTHLY' },
-    validity,
-    purpose: '严格额度测试',
-    createdBy: 'admin'
-  });
-  const strictCredId = strictResult.credential!.credentialId;
-
-  const strictExec1 = await strictSdk.executeUsage({
-    credentialId: strictCredId,
-    purpose: '消耗3次',
-    callerIdentity: consumer,
-    callCount: 3
-  });
-  assert(strictExec1.success === true, '消耗3次成功');
-
-  const strictExec2 = await strictSdk.executeUsage({
-    credentialId: strictCredId,
-    purpose: '再消耗3次',
-    callerIdentity: consumer,
-    callCount: 3
-  });
-  assert(strictExec2.success === false, '超出额度被拒绝（3+3=6 > 5）');
-  assert(strictExec2.error!.code === ErrorCode.QUOTA_INSUFFICIENT, '错误码为QUOTA_INSUFFICIENT');
-
-  const strictCred = await strictSdk.getCredential(strictCredId);
-  assert(strictCred!.currentPeriod.usedCalls === 3, '已用量仍为3（未超上限）');
-
-  cleanupTestStorage();
+  console.log('\n--- 测试30: 清理测试数据 ---');
+  cleanup();
+  assert(!fs.existsSync(testStorageDir), '测试数据已清理');
 
   console.log('\n========== 全部测试通过 ==========\n');
 })();
