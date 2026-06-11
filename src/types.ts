@@ -26,8 +26,15 @@ export enum ErrorCode {
   PURPOSE_REQUIRED = 'PURPOSE_REQUIRED',
   QUOTA_INSUFFICIENT = 'QUOTA_INSUFFICIENT',
   INVALID_DATE_RANGE = 'INVALID_DATE_RANGE',
+  INVALID_CALL_COUNT = 'INVALID_CALL_COUNT',
+  INVALID_DATA_ROWS = 'INVALID_DATA_ROWS',
+  INVALID_DATA_SIZE = 'INVALID_DATA_SIZE',
+  PRECHECK_REQUIRED = 'PRECHECK_REQUIRED',
+  STORAGE_ERROR = 'STORAGE_ERROR',
   UNKNOWN_ERROR = 'UNKNOWN_ERROR'
 }
+
+export type PeriodType = 'ONCE' | 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY';
 
 export interface SubjectIdentity {
   id: string;
@@ -54,7 +61,7 @@ export interface QuotaConfig {
   maxCalls: number;
   maxDataRows?: number;
   maxDataSizeKB?: number;
-  periodType: 'ONCE' | 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY';
+  periodType: PeriodType;
 }
 
 export interface ValidityPeriod {
@@ -77,6 +84,16 @@ export interface UsageLogEntry {
   dataSizeKB?: number;
   callerIdentity: string;
   remark?: string;
+  periodKey?: string;
+}
+
+export interface PeriodUsage {
+  periodKey: string;
+  periodStart: number;
+  periodEnd: number;
+  usedCalls: number;
+  usedRows: number;
+  usedSizeKB: number;
 }
 
 export interface AuthorizationOrder {
@@ -98,6 +115,8 @@ export interface AuthCredential {
   status: CredentialStatus;
   order: AuthorizationOrder;
   usageLogs: UsageLogEntry[];
+  currentPeriod: PeriodUsage;
+  periodHistory: PeriodUsage[];
   totalUsedCalls: number;
   totalUsedRows?: number;
   totalUsedSizeKB?: number;
@@ -124,6 +143,78 @@ export interface ValidationParams {
   purpose?: string;
   expectedDataRows?: number;
   expectedDataSizeKB?: number;
+}
+
+export interface PreCheckParams {
+  credentialId: string;
+  callCount: number;
+  dataRows?: number;
+  dataSizeKB?: number;
+}
+
+export interface PreCheckResult {
+  canProceed: boolean;
+  message: string;
+  code?: ErrorCode;
+  reservedQuota?: {
+    calls: number;
+    rows?: number;
+    sizeKB?: number;
+  };
+  remainingAfterDeduction?: {
+    calls: number;
+    rows?: number;
+    sizeKB?: number;
+  };
+}
+
+export interface ExecuteUsageParams {
+  credentialId: string;
+  purpose: string;
+  callerIdentity: SubjectIdentity;
+  callCount: number;
+  dataRows?: number;
+  dataSizeKB?: number;
+  remark?: string;
+}
+
+export interface ExecuteUsageResult {
+  success: boolean;
+  logEntry?: UsageLogEntry;
+  updatedCredential?: AuthCredential;
+  deducted?: {
+    calls: number;
+    rows?: number;
+    sizeKB?: number;
+  };
+  remainingAfter?: {
+    calls: number;
+    rows?: number;
+    sizeKB?: number;
+  };
+  error?: SDKError;
+}
+
+export interface BatchValidationItem {
+  credentialId: string;
+  productId: string;
+  sceneId: string;
+  callerIdentity: SubjectIdentity;
+  purpose?: string;
+  expectedDataRows?: number;
+  expectedDataSizeKB?: number;
+}
+
+export interface BatchValidationResult {
+  results: Array<ValidationResult & { index: number }>;
+  summary: {
+    total: number;
+    passed: number;
+    rejected: number;
+    pending: number;
+    nearExpiryCredentials: Array<{ credentialId: string; remainingDays: number }>;
+    lowQuotaCredentials: Array<{ credentialId: string; usageRate: number }>;
+  };
 }
 
 export interface ValidationResult {
@@ -155,6 +246,25 @@ export interface AuditSummary {
     usedSizeKB?: number;
     remainingSizeKB?: number;
   };
+  currentPeriod: {
+    periodKey: string;
+    periodStart: string;
+    periodEnd: string;
+    usedCalls: number;
+    usedRows: number;
+    usedSizeKB: number;
+    remainingCalls: number;
+    remainingRows: number;
+    remainingSizeKB: number;
+  };
+  periodHistory: Array<{
+    periodKey: string;
+    periodStart: string;
+    periodEnd: string;
+    usedCalls: number;
+    usedRows: number;
+    usedSizeKB: number;
+  }>;
   totalUsageLogs: number;
   lastUsedAt?: number;
   scopeSummary: {
@@ -169,4 +279,11 @@ export interface SDKError {
   message: string;
   details?: Record<string, unknown>;
   timestamp: number;
+}
+
+export interface IStorage {
+  get(credentialId: string): Promise<AuthCredential | null>;
+  set(credentialId: string, credential: AuthCredential): Promise<void>;
+  delete(credentialId: string): Promise<void>;
+  list(): Promise<AuthCredential[]>;
 }

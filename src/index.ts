@@ -1,56 +1,88 @@
 import { CredentialManager } from './CredentialManager';
+import { MemoryStorage } from './storage/MemoryStorage';
+import { FileStorage } from './storage/FileStorage';
 import {
   AuthCredential,
-  AuthorizationOrder,
   AuditSummary,
+  BatchValidationItem,
+  BatchValidationResult,
   CreateOrderParams,
   CredentialStatus,
   ErrorCode,
-  QuotaConfig,
+  ExecuteUsageParams,
+  ExecuteUsageResult,
+  IStorage,
+  PreCheckParams,
+  PreCheckResult,
   SDKError,
   SubjectIdentity,
   UsageLogEntry,
-  UsageScope,
   ValidationParams,
   ValidationResult,
   ValidationResultType,
+  AuthorizationOrder,
+  QuotaConfig,
+  UsageScope,
   ValidityPeriod,
   ProductInfo,
-  UsageScene
+  UsageScene,
+  PeriodUsage,
+  PeriodType
 } from './types';
 import {
   calculateRemainingDays,
   compareIdentity,
   formatError,
   formatTimestamp,
-  generateCredentialId,
   generateCredentialNo,
-  generateLogId,
-  generateOrderId,
-  getErrorMessage
+  getErrorMessage,
+  getPeriodKey,
+  getPeriodRange
 } from './utils';
+
+export interface SDKOptions {
+  storage?: IStorage;
+  storageType?: 'memory' | 'file';
+  storagePath?: string;
+}
 
 export class DataAuthCredentialSDK {
   private manager: CredentialManager;
+  private storageInstance: IStorage;
 
-  constructor() {
-    this.manager = new CredentialManager();
+  constructor(options?: SDKOptions) {
+    if (options?.storage) {
+      this.storageInstance = options.storage;
+    } else if (options?.storageType === 'file') {
+      this.storageInstance = new FileStorage(options.storagePath);
+    } else {
+      this.storageInstance = new MemoryStorage();
+    }
+    this.manager = new CredentialManager(this.storageInstance);
   }
 
-  createAuthorization(params: CreateOrderParams): {
+  async createAuthorization(params: CreateOrderParams): Promise<{
     success: boolean;
     order?: AuthorizationOrder;
     credential?: AuthCredential;
     error?: SDKError;
-  } {
+  }> {
     return this.manager.createAuthorizationOrder(params);
   }
 
-  validate(params: ValidationParams): ValidationResult {
+  async validate(params: ValidationParams): Promise<ValidationResult> {
     return this.manager.validateCredential(params);
   }
 
-  recordUsage(
+  async preCheck(params: PreCheckParams): Promise<PreCheckResult> {
+    return this.manager.preCheck(params);
+  }
+
+  async executeUsage(params: ExecuteUsageParams): Promise<ExecuteUsageResult> {
+    return this.manager.executeUsage(params);
+  }
+
+  async recordUsage(
     credentialId: string,
     purpose: string,
     callerIdentity: SubjectIdentity,
@@ -58,12 +90,12 @@ export class DataAuthCredentialSDK {
     dataRows?: number,
     dataSizeKB?: number,
     remark?: string
-  ): {
+  ): Promise<{
     success: boolean;
     logEntry?: UsageLogEntry;
     updatedCredential?: AuthCredential;
     error?: SDKError;
-  } {
+  }> {
     return this.manager.recordUsage(
       credentialId,
       purpose,
@@ -75,16 +107,16 @@ export class DataAuthCredentialSDK {
     );
   }
 
-  checkUsageScope(
+  async checkUsageScope(
     credentialId: string,
     productId: string,
     sceneId: string
-  ): {
+  ): Promise<{
     valid: boolean;
     message: string;
     code?: ErrorCode;
-  } {
-    const credential = this.manager.getCredential(credentialId);
+  }> {
+    const credential = await this.manager.getCredential(credentialId);
     if (!credential) {
       return {
         valid: false,
@@ -114,17 +146,17 @@ export class DataAuthCredentialSDK {
     return { valid: true, message: '使用范围校验通过' };
   }
 
-  recordPurpose(
+  async recordPurpose(
     credentialId: string,
     purpose: string,
     callerIdentity: SubjectIdentity,
     callCount: number = 1
-  ): {
+  ): Promise<{
     success: boolean;
     logEntry?: UsageLogEntry;
     error?: SDKError;
-  } {
-    const result = this.manager.recordUsage(
+  }> {
+    const result = await this.manager.recordUsage(
       credentialId,
       purpose,
       callerIdentity,
@@ -137,7 +169,7 @@ export class DataAuthCredentialSDK {
     };
   }
 
-  checkValidity(credentialId: string): {
+  async checkValidity(credentialId: string): Promise<{
     success: boolean;
     validity?: {
       isValid: boolean;
@@ -149,7 +181,7 @@ export class DataAuthCredentialSDK {
       isNotYetEffective: boolean;
     };
     error?: SDKError;
-  } {
+  }> {
     return this.manager.checkValidity(credentialId);
   }
 
@@ -157,30 +189,30 @@ export class DataAuthCredentialSDK {
     return generateCredentialNo();
   }
 
-  appendUsageLog(
+  async appendUsageLog(
     credentialId: string,
-    logEntry: Omit<UsageLogEntry, 'logId' | 'timestamp'>
-  ): {
+    logEntry: Omit<UsageLogEntry, 'logId' | 'timestamp' | 'periodKey'>
+  ): Promise<{
     success: boolean;
     log?: UsageLogEntry;
     error?: SDKError;
-  } {
+  }> {
     return this.manager.appendUsageLog(credentialId, logEntry);
   }
 
-  revokeCredential(
+  async revokeCredential(
     credentialId: string,
     revokedBy: string,
     reason: string
-  ): {
+  ): Promise<{
     success: boolean;
     updatedCredential?: AuthCredential;
     error?: SDKError;
-  } {
+  }> {
     return this.manager.revokeCredential(credentialId, revokedBy, reason);
   }
 
-  getRemainingQuota(credentialId: string): {
+  async getRemainingQuota(credentialId: string): Promise<{
     success: boolean;
     quota?: {
       remainingCalls: number;
@@ -190,16 +222,20 @@ export class DataAuthCredentialSDK {
       maxCalls: number;
       maxRows?: number;
       maxSizeKB?: number;
+      periodKey: string;
+      periodUsedCalls: number;
+      periodUsedRows?: number;
+      periodUsedSizeKB?: number;
     };
     error?: SDKError;
-  } {
+  }> {
     return this.manager.getRemainingQuota(credentialId);
   }
 
-  verifyIdentity(
+  async verifyIdentity(
     credentialId: string,
     subjectIdentity: SubjectIdentity
-  ): {
+  ): Promise<{
     success: boolean;
     verification?: {
       isProvider: boolean;
@@ -207,12 +243,16 @@ export class DataAuthCredentialSDK {
       matchedRole: 'PROVIDER' | 'CONSUMER' | 'NONE';
     };
     error?: SDKError;
-  } {
+  }> {
     return this.manager.verifyIdentity(credentialId, subjectIdentity);
   }
 
-  getAuditSummary(credentialId: string): AuditSummary | null {
-    return this.manager.generateAuditSummary(credentialId);
+  async getAuditSummary(credentialId: string): Promise<AuditSummary | null> {
+    return this.manager.generateAuditSummaryAsync(credentialId);
+  }
+
+  async batchValidate(items: BatchValidationItem[]): Promise<BatchValidationResult> {
+    return this.manager.batchValidate(items);
   }
 
   formatError(
@@ -223,26 +263,43 @@ export class DataAuthCredentialSDK {
     return formatError(code, customMessage || getErrorMessage(code), details);
   }
 
-  getCredential(credentialId: string): AuthCredential | undefined {
+  async getCredential(credentialId: string): Promise<AuthCredential | undefined> {
     return this.manager.getCredential(credentialId);
   }
 
-  getAllCredentials(): AuthCredential[] {
+  async getAllCredentials(): Promise<AuthCredential[]> {
     return this.manager.getAllCredentials();
   }
 
   compareIdentity(a: { id: string; type?: string }, b: { id: string; type?: string }): boolean {
     return compareIdentity(a, b);
   }
+
+  getPeriodKey(periodType: PeriodType, timestamp: number): string {
+    return getPeriodKey(periodType, timestamp);
+  }
+
+  getPeriodRange(periodType: PeriodType, timestamp: number): { start: number; end: number } {
+    return getPeriodRange(periodType, timestamp);
+  }
 }
 
 export {
   AuthCredential,
-  AuthorizationOrder,
   AuditSummary,
+  AuthorizationOrder,
+  BatchValidationItem,
+  BatchValidationResult,
   CreateOrderParams,
   CredentialStatus,
   ErrorCode,
+  ExecuteUsageParams,
+  ExecuteUsageResult,
+  IStorage,
+  PeriodUsage,
+  PeriodType,
+  PreCheckParams,
+  PreCheckResult,
   QuotaConfig,
   SDKError,
   SubjectIdentity,
@@ -254,13 +311,14 @@ export {
   ValidityPeriod,
   ProductInfo,
   UsageScene,
+  MemoryStorage,
+  FileStorage,
   calculateRemainingDays,
   formatTimestamp,
-  generateCredentialId,
   generateCredentialNo,
-  generateLogId,
-  generateOrderId,
-  getErrorMessage
+  getErrorMessage,
+  getPeriodKey,
+  getPeriodRange
 };
 
 export default DataAuthCredentialSDK;

@@ -1,4 +1,4 @@
-import { ErrorCode, SDKError } from './types';
+import { ErrorCode, PeriodType, SDKError } from './types';
 
 export function generateCredentialNo(): string {
   const timestamp = Date.now().toString(36).toUpperCase();
@@ -54,6 +54,11 @@ export function getErrorMessage(code: ErrorCode): string {
     [ErrorCode.PURPOSE_REQUIRED]: '调用目的不能为空',
     [ErrorCode.QUOTA_INSUFFICIENT]: '剩余额度不足',
     [ErrorCode.INVALID_DATE_RANGE]: '有效日期范围无效',
+    [ErrorCode.INVALID_CALL_COUNT]: '调用次数必须为正整数',
+    [ErrorCode.INVALID_DATA_ROWS]: '数据行数必须为正整数',
+    [ErrorCode.INVALID_DATA_SIZE]: '数据量必须为正数',
+    [ErrorCode.PRECHECK_REQUIRED]: '需要先执行预检查',
+    [ErrorCode.STORAGE_ERROR]: '存储操作失败',
     [ErrorCode.UNKNOWN_ERROR]: '未知错误'
   };
   return errorMessages[code] || errorMessages[ErrorCode.UNKNOWN_ERROR];
@@ -84,16 +89,6 @@ export function validateDateRange(startTime: number, endTime: number): boolean {
   return true;
 }
 
-export function sha256(input: string): string {
-  let hash = 0;
-  for (let i = 0; i < input.length; i++) {
-    const char = input.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
-  return Math.abs(hash).toString(16).padStart(16, '0');
-}
-
 export function compareIdentity(
   identityA: { id: string; type?: string },
   identityB: { id: string; type?: string }
@@ -102,4 +97,70 @@ export function compareIdentity(
   if (identityA.id !== identityB.id) return false;
   if (identityA.type && identityB.type && identityA.type !== identityB.type) return false;
   return true;
+}
+
+export function getPeriodKey(periodType: PeriodType, timestamp: number): string {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = date.getMonth();
+  const day = date.getDate();
+  const weekDay = date.getDay();
+
+  switch (periodType) {
+    case 'ONCE':
+      return 'ONCE';
+    case 'DAILY':
+      return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    case 'WEEKLY': {
+      const weekStart = new Date(timestamp);
+      weekStart.setDate(day - (weekDay === 0 ? 6 : weekDay - 1));
+      const wsYear = weekStart.getFullYear();
+      const wsMonth = weekStart.getMonth() + 1;
+      const wsDay = weekStart.getDate();
+      return `W${wsYear}-${String(wsMonth).padStart(2, '0')}-${String(wsDay).padStart(2, '0')}`;
+    }
+    case 'MONTHLY':
+      return `${year}-${String(month + 1).padStart(2, '0')}`;
+    case 'YEARLY':
+      return `${year}`;
+  }
+}
+
+export function getPeriodRange(periodType: PeriodType, timestamp: number): { start: number; end: number } {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = date.getMonth();
+  const day = date.getDate();
+  const weekDay = date.getDay();
+
+  switch (periodType) {
+    case 'ONCE':
+      return { start: 0, end: Infinity };
+    case 'DAILY': {
+      const start = new Date(year, month, day).getTime();
+      const end = new Date(year, month, day + 1).getTime() - 1;
+      return { start, end };
+    }
+    case 'WEEKLY': {
+      const mondayOffset = weekDay === 0 ? 6 : weekDay - 1;
+      const weekStartDate = new Date(year, month, day - mondayOffset);
+      const start = weekStartDate.getTime();
+      const end = new Date(weekStartDate.getFullYear(), weekStartDate.getMonth(), weekStartDate.getDate() + 7).getTime() - 1;
+      return { start, end };
+    }
+    case 'MONTHLY': {
+      const start = new Date(year, month, 1).getTime();
+      const end = new Date(year, month + 1, 1).getTime() - 1;
+      return { start, end };
+    }
+    case 'YEARLY': {
+      const start = new Date(year, 0, 1).getTime();
+      const end = new Date(year + 1, 0, 1).getTime() - 1;
+      return { start, end };
+    }
+  }
+}
+
+export function isNewPeriod(currentPeriodKey: string, newPeriodKey: string): boolean {
+  return currentPeriodKey !== newPeriodKey;
 }
