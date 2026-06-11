@@ -1,4 +1,5 @@
 import {
+  AuditRejectionEvent,
   AuthCredential,
   AuthorizationOrder,
   AuditSummary,
@@ -13,6 +14,7 @@ import {
   PeriodUsage,
   PreCheckParams,
   PreCheckResult,
+  RejectionCategory,
   SDKError,
   SubjectIdentity,
   UsageLogEntry,
@@ -30,9 +32,11 @@ import {
   generateCredentialNo,
   generateLogId,
   generateOrderId,
+  generateRejectionEventId,
   getErrorMessage,
   getPeriodKey,
   getPeriodRange,
+  getRejectionCategory,
   isNewPeriod,
   validateDateRange
 } from './utils';
@@ -136,21 +140,12 @@ export class CredentialManager {
 
       const statusCheck = this.checkCredentialStatus(credential);
       if (!statusCheck.valid) {
-        return this.buildRejectResult(statusCheck.errorCode!, statusCheck.message!, credential);
+        return this.buildRejectResult(statusCheck.errorCode!, statusCheck.message!, credential, params);
       }
 
       const scopeCheck = this.validateUsageScope(credential, params.productId, params.sceneId);
       if (!scopeCheck.valid) {
-        return this.buildRejectResult(scopeCheck.errorCode!, scopeCheck.message!, credential);
-      }
-
-      const identityCheck = this.validateIdentity(credential, params.callerIdentity);
-      if (!identityCheck.valid) {
-        return this.buildRejectResult(
-          ErrorCode.IDENTITY_MISMATCH,
-          getErrorMessage(ErrorCode.IDENTITY_MISMATCH),
-          credential
-        );
+        return this.buildRejectResult(scopeCheck.errorCode!, scopeCheck.message!, credential, params);
       }
 
       const refreshedCred = await this.refreshPeriodIfNeeded(credential);
@@ -162,6 +157,13 @@ export class CredentialManager {
           || `${getErrorMessage(hitErrorCode)} - 策略: ${policyCheck.policyName}, 规则: ${policyCheck.hitRule?.ruleName}`;
 
         if (policyCheck.missingFields && policyCheck.missingFields.length > 0) {
+          await this.recordRejection(hitErrorCode, hitErrorMessage, refreshedCred, params, {
+            policyId: policyCheck.policyId,
+            policyName: policyCheck.policyName,
+            ruleId: policyCheck.hitRule?.ruleId,
+            ruleName: policyCheck.hitRule?.ruleName,
+            details: { missingFields: policyCheck.missingFields }
+          });
           return {
             type: ValidationResultType.PENDING,
             passed: false,
@@ -173,6 +175,12 @@ export class CredentialManager {
           };
         }
 
+        await this.recordRejection(hitErrorCode, hitErrorMessage, refreshedCred, params, {
+          policyId: policyCheck.policyId,
+          policyName: policyCheck.policyName,
+          ruleId: policyCheck.hitRule?.ruleId,
+          ruleName: policyCheck.hitRule?.ruleName
+        });
         return {
           type: ValidationResultType.REJECT,
           passed: false,
@@ -183,6 +191,15 @@ export class CredentialManager {
         };
       }
 
+      const identityCheck = this.validateIdentity(credential, params.callerIdentity);
+      if (!identityCheck.valid) {
+        return this.buildRejectResult(
+          ErrorCode.IDENTITY_MISMATCH,
+          getErrorMessage(ErrorCode.IDENTITY_MISMATCH),
+          credential,
+          params
+        );
+      }
       const hasAnyPolicy = this.policyManager.listPolicies().length > 0;
       if (!hasAnyPolicy && !params.purpose) {
         return {
@@ -202,7 +219,8 @@ export class CredentialManager {
           return this.buildRejectResult(
             ErrorCode.SCOPE_MISMATCH,
             '调用目的不在授权范围内',
-            refreshedCred
+            refreshedCred,
+            params
           );
         }
       }
@@ -216,7 +234,8 @@ export class CredentialManager {
         return this.buildRejectResult(
           ErrorCode.QUOTA_INSUFFICIENT,
           quotaCheck.message!,
-          refreshedCred
+          refreshedCred,
+          params
         );
       }
 
@@ -996,6 +1015,19 @@ export class CredentialManager {
     return this.storage.list();
   }
 
+  async listRejectionEvents(filter?: {
+    startTime?: number;
+    endTime?: number;
+    credentialId?: string;
+    providerId?: string;
+    consumerId?: string;
+    productId?: string;
+    errorCode?: ErrorCode;
+    category?: RejectionCategory;
+  }): Promise<AuditRejectionEvent[]> {
+    return this.storage.listRejectionEvents(filter);
+  }
+
   private async refreshPeriodIfNeeded(credential: AuthCredential): Promise<AuthCredential> {
     if (credential.order.quota.periodType === 'ONCE') {
       return credential;
@@ -1149,11 +1181,63 @@ export class CredentialManager {
     return { sufficient: true };
   }
 
-  private buildRejectResult(
+  private async recordRejection(
     code: ErrorCode,
     message: string,
-    credential?: AuthCredential
-  ): ValidationResult {
+    credential?: AuthCredential,
+    params?: Partial<ValidationParams>,
+    extra?: {
+      policyId?: string;
+      policyName?: string;
+      ruleId?: string;
+      ruleName?: string;
+      details?: Record<string, unknown>;
+    }
+  ): Promise<void> {
+    try {
+      if (!credential) return;
+
+      const event: AuditRejectionEvent = {
+        eventId: generateRejectionEventId(),
+        timestamp: Date.now(),
+        credentialId: credential.credentialId,
+        credentialNo: credential.credentialNo,
+        providerId: credential.order.provider.id,
+        providerName: credential.order.provider.name,
+        consumerId: credential.order.consumer.id,
+        consumerName: credential.order.consumer.name,
+        productId: params?.productId,
+        sceneId: params?.sceneId,
+        errorCode: code,
+        errorMessage: message,
+        category: getRejectionCategory(code),
+        policyId: extra?.policyId,
+        policyName: extra?.policyName,
+        ruleId: extra?.ruleId,
+        ruleName: extra?.ruleName,
+        callerIdentityId: params?.callerIdentity?.id,
+        details: extra?.details
+      };
+
+      await this.storage.addRejectionEvent(event);
+    } catch {
+    }
+  }
+
+  private async buildRejectResult(
+    code: ErrorCode,
+    message: string,
+    credential?: AuthCredential,
+    params?: Partial<ValidationParams>,
+    extra?: {
+      policyId?: string;
+      policyName?: string;
+      ruleId?: string;
+      ruleName?: string;
+      details?: Record<string, unknown>;
+    }
+  ): Promise<ValidationResult> {
+    await this.recordRejection(code, message, credential, params, extra);
     return {
       type: ValidationResultType.REJECT,
       passed: false,

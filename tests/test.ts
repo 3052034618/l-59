@@ -6,7 +6,8 @@ import {
   ValidationResultType,
   ErrorCode,
   MemoryStorage,
-  FileStorage
+  FileStorage,
+  RejectionCategory
 } from '../src';
 
 function assert(condition: boolean, message: string): void {
@@ -588,7 +589,317 @@ let credentialId: string = '';
   assert(policyValResult.type === ValidationResultType.REJECT, '数据量超限被策略拒绝');
   assert(policyValResult.code === ErrorCode.INVALID_DATA_SIZE, '错误码正确');
 
-  console.log('\n--- 测试30: 清理测试数据 ---');
+  console.log('\n--- 测试30: 时间段报表 - 不同时间段数值不同 ---');
+  const timeSdk = new DataAuthCredentialSDK();
+  timeSdk.addRequiredFieldPolicy('PRODUCT', 'PROD-001', ['purpose'], '测试必填策略');
+
+  const tCreate1 = await timeSdk.createAuthorization({
+    provider,
+    consumer,
+    scope,
+    quota: { maxCalls: 100, periodType: 'MONTHLY' },
+    validity,
+    purpose: '时间段测试',
+    createdBy: 'admin'
+  });
+  const tCredId1 = tCreate1.credential!.credentialId;
+
+  const t1Start = Date.now();
+  await timeSdk.executeUsage({
+    credentialId: tCredId1,
+    purpose: 'T1调用',
+    callerIdentity: consumer,
+    callCount: 3,
+    dataRows: 150,
+    dataSizeKB: 600
+  });
+  const t1End = Date.now();
+
+  await new Promise(r => setTimeout(r, 5));
+
+  const t2Start = Date.now();
+  await timeSdk.executeUsage({
+    credentialId: tCredId1,
+    purpose: 'T2调用',
+    callerIdentity: consumer,
+    callCount: 7,
+    dataRows: 350,
+    dataSizeKB: 1400
+  });
+  const t2End = Date.now();
+
+  const reportT1 = await timeSdk.generateUsageReport({
+    startTime: t1Start,
+    endTime: t1End,
+    filterByTimeRange: true
+  });
+  const reportT2 = await timeSdk.generateUsageReport({
+    startTime: t2Start,
+    endTime: t2End,
+    filterByTimeRange: true
+  });
+  const timeReportAll = await timeSdk.generateUsageReport({
+    startTime: 0,
+    endTime: Date.now(),
+    filterByTimeRange: true
+  });
+
+  assert(reportT1.summary.totalCalls === 3, `T1时间段调用=3（实际${reportT1.summary.totalCalls}）`);
+  assert(reportT1.summary.totalDataRows === 150, 'T1数据行数=150');
+  assert(reportT2.summary.totalCalls === 7, `T2时间段调用=7（实际${reportT2.summary.totalCalls}）`);
+  assert(reportT2.summary.totalDataSizeKB === 1400, 'T2数据量=1400KB');
+  assert(timeReportAll.summary.totalCalls === 10, '全量调用=10');
+  console.log(`T1调用=${reportT1.summary.totalCalls}, T2调用=${reportT2.summary.totalCalls}, 全量=${timeReportAll.summary.totalCalls}`);
+  console.log('时间段过滤统计生效');
+
+  console.log('\n--- 测试31: 异常拒绝事件沉淀 + 分类统计 ---');
+  const rejectSdk = new DataAuthCredentialSDK();
+  rejectSdk.addRequiredFieldPolicy('PRODUCT', 'PROD-001', ['purpose', 'expectedDataRows'], '拒绝事件测试策略');
+
+  const rCreate = await rejectSdk.createAuthorization({
+    provider,
+    consumer,
+    scope,
+    quota: { maxCalls: 100, periodType: 'MONTHLY' },
+    validity,
+    purpose: '拒绝事件测试',
+    createdBy: 'admin'
+  });
+  const rCredId = rCreate.credential!.credentialId;
+
+  await rejectSdk.validate({
+    credentialId: rCredId,
+    productId: 'PROD-001',
+    sceneId: 'SCENE-001',
+    callerIdentity: consumer
+  });
+  await rejectSdk.validate({
+    credentialId: rCredId,
+    productId: 'PROD-001',
+    sceneId: 'SCENE-001',
+    callerIdentity: consumer
+  });
+
+  const wrongConsumer = { id: 'WRONG', name: '别人', type: 'ORGANIZATION' as const };
+  await rejectSdk.validate({
+    credentialId: rCredId,
+    productId: 'PROD-001',
+    sceneId: 'SCENE-001',
+    callerIdentity: wrongConsumer,
+    purpose: '测试',
+    expectedDataRows: 100
+  });
+
+  await rejectSdk.executeUsage({
+    credentialId: rCredId,
+    purpose: '测试',
+    callerIdentity: consumer,
+    callCount: -1
+  });
+
+  const rejectionEvents = await rejectSdk.listRejectionEvents();
+  assert(rejectionEvents.length >= 4, `至少4次拒绝事件（实际${rejectionEvents.length}）`);
+
+  const hasPolicy = rejectionEvents.some(e => e.category === 'POLICY');
+  const hasIdentity = rejectionEvents.some(e => e.category === 'IDENTITY');
+  const hasParam = rejectionEvents.some(e => e.category === 'PARAM');
+  assert(hasPolicy, '包含POLICY分类拒绝');
+  assert(hasIdentity, '包含IDENTITY分类拒绝');
+  assert(hasParam, '包含PARAM分类拒绝');
+
+  const rReport = await rejectSdk.generateUsageReport({
+    startTime: 0,
+    endTime: Date.now(),
+    includeRejectionStats: true
+  });
+  assert(rReport.summary.rejectionSummary !== undefined, '报表包含拒绝分类汇总');
+  const totalRejections = rReport.summary.rejectionSummary!.reduce((s, r) => s + r.count, 0);
+  assert(totalRejections >= 4, `拒绝分类汇总次数正确（${totalRejections}）`);
+
+  const policySummary = rReport.summary.rejectionSummary!.find(r => r.category === 'POLICY');
+  assert(policySummary !== undefined, 'POLICY分类汇总存在');
+  assert(policySummary!.sampleEvents.length > 0, '包含示例事件');
+  console.log(`拒绝事件: ${rejectionEvents.length}次, POLICY=${hasPolicy}, IDENTITY=${hasIdentity}, PARAM=${hasParam}`);
+  console.log(`拒绝分类汇总: ${rReport.summary.rejectionSummary!.length}类, 共${totalRejections}次`);
+
+  console.log('\n--- 测试32: 多凭证周期用量汇总 ---');
+  const multiSdk = new DataAuthCredentialSDK();
+
+  const c1 = await multiSdk.createAuthorization({
+    provider,
+    consumer,
+    scope,
+    quota: { maxCalls: 500, periodType: 'MONTHLY' },
+    validity,
+    purpose: '多凭证A',
+    createdBy: 'admin'
+  });
+
+  const consumer2 = { id: 'CONS-002', name: '第二个使用方', type: 'ORGANIZATION' as const };
+  const c2 = await multiSdk.createAuthorization({
+    provider,
+    consumer: consumer2,
+    scope,
+    quota: { maxCalls: 200, periodType: 'MONTHLY' },
+    validity,
+    purpose: '多凭证B',
+    createdBy: 'admin'
+  });
+
+  await multiSdk.executeUsage({
+    credentialId: c1.credential!.credentialId,
+    purpose: 'A调用',
+    callerIdentity: consumer,
+    callCount: 5,
+    dataRows: 250,
+    dataSizeKB: 1000
+  });
+  await multiSdk.executeUsage({
+    credentialId: c2.credential!.credentialId,
+    purpose: 'B调用',
+    callerIdentity: consumer2,
+    callCount: 3,
+    dataRows: 150,
+    dataSizeKB: 600
+  });
+
+  const providerReport = await multiSdk.generateReportByProvider(provider.id, {
+    startTime: 0,
+    endTime: Date.now(),
+    includePeriodDetails: true
+  });
+  assert(providerReport.summary.totalCredentials === 2, '涉及2张凭证');
+  assert(providerReport.summary.totalCalls === 8, '汇总调用=8');
+  assert(providerReport.summary.totalDataRows === 400, '汇总行数=400');
+
+  const item = providerReport.items[0];
+  assert(item.periodUsages !== undefined && item.periodUsages.length > 0, '包含periodUsages周期汇总');
+  const agg = item.periodUsages![0];
+  assert(agg.credentialCount === 2, `周期汇总涉及2张凭证（实际${agg.credentialCount}）`);
+  assert(agg.usedCalls === 8, `周期汇总调用=8（实际${agg.usedCalls}）`);
+  assert(agg.usedRows === 400, '周期汇总行数=400');
+
+  assert(item.currentPeriodUsage !== undefined, '包含currentPeriodUsage');
+  assert(item.currentPeriodUsage!.credentialCount === 2, '当前周期涉及2张凭证');
+  console.log(`2张凭证周期汇总: ${agg.usedCalls}次, ${agg.usedRows}行, ${agg.usedSizeKB}KB, 涉及${agg.credentialCount}张凭证`);
+
+  console.log('\n--- 测试33: 拒绝事件按维度+时间段过滤查询 ---');
+  const filtered = await rejectSdk.listRejectionEvents({
+    category: 'POLICY' as RejectionCategory
+  });
+  assert(filtered.length >= 2, '按分类过滤POLICY至少2条');
+  filtered.forEach(e => assert(e.category === 'POLICY', '过滤结果都是POLICY分类'));
+
+  const filteredByCode = await rejectSdk.listRejectionEvents({
+    errorCode: ErrorCode.IDENTITY_MISMATCH
+  });
+  assert(filteredByCode.length >= 1, '按错误码过滤返回结果');
+
+  const filteredByCred = await rejectSdk.listRejectionEvents({
+    credentialId: rCredId
+  });
+  assert(filteredByCred.length >= 4, '按凭证ID过滤返回结果');
+
+  console.log('拒绝事件多维过滤查询正常');
+
+  console.log('\n--- 测试34: FileStorage 拒绝事件持久化 ---');
+  cleanup();
+  const persistSdk1 = new DataAuthCredentialSDK({
+    storageType: 'file',
+    storagePath: testStorageDir
+  });
+  persistSdk1.addRequiredFieldPolicy('PRODUCT', 'PROD-001', ['purpose'], '持久化拒绝策略');
+
+  const pCreate = await persistSdk1.createAuthorization({
+    provider,
+    consumer,
+    scope,
+    quota: { maxCalls: 100, periodType: 'MONTHLY' },
+    validity,
+    purpose: '持久化测试',
+    createdBy: 'admin'
+  });
+  const pCredId = pCreate.credential!.credentialId;
+
+  await persistSdk1.executeUsage({
+    credentialId: pCredId,
+    purpose: '正常调用',
+    callerIdentity: consumer,
+    callCount: 3
+  });
+  await persistSdk1.validate({
+    credentialId: pCredId,
+    productId: 'PROD-001',
+    sceneId: 'SCENE-001',
+    callerIdentity: consumer
+  });
+  await persistSdk1.validate({
+    credentialId: pCredId,
+    productId: 'PROD-001',
+    sceneId: 'SCENE-001',
+    callerIdentity: { id: 'X', name: 'X', type: 'ORGANIZATION' }
+  });
+
+  const rejectionsBefore = await persistSdk1.listRejectionEvents();
+  assert(rejectionsBefore.length === 2, '重启前2次拒绝事件');
+
+  console.log('重启SDK（含拒绝事件持久化）...');
+  const persistSdk2 = new DataAuthCredentialSDK({
+    storageType: 'file',
+    storagePath: testStorageDir
+  });
+
+  const pRestoredCred = await persistSdk2.getCredential(pCredId);
+  assert(pRestoredCred !== undefined, '重启后凭证恢复');
+  assert(pRestoredCred!.totalUsedCalls === 3, '重启后调用次数恢复');
+
+  const rejectionsAfter = await persistSdk2.listRejectionEvents();
+  assert(rejectionsAfter.length === 2, `重启后拒绝事件=2（实际${rejectionsAfter.length}）`);
+  assert(rejectionsAfter[0].eventId === rejectionsBefore[0].eventId, '重启后拒绝事件ID一致');
+  assert(rejectionsAfter[0].category === rejectionsBefore[0].category, '重启后分类一致');
+
+  const pReport = await persistSdk2.generateUsageReport({
+    startTime: 0,
+    endTime: Date.now(),
+    includeRejectionStats: true
+  });
+  assert(pReport.summary.totalCalls === 3, '重启后报表调用次数=3');
+  const rejSum = pReport.summary.rejectionSummary!.reduce((s, r) => s + r.count, 0);
+  assert(rejSum === 2, '重启后报表拒绝汇总=2');
+  console.log(`重启后拒绝事件: ${rejectionsAfter.length}次, 报表拒绝汇总: ${rejSum}次`);
+  console.log('拒绝事件持久化+重启恢复正常');
+
+  console.log('\n--- 测试35: 撤销凭证后校验产生拒绝事件 ---');
+  const revokeSdk = new DataAuthCredentialSDK();
+  const rvCreate = await revokeSdk.createAuthorization({
+    provider,
+    consumer,
+    scope,
+    quota: { maxCalls: 100, periodType: 'MONTHLY' },
+    validity,
+    purpose: '撤销测试',
+    createdBy: 'admin'
+  });
+  const rvCredId = rvCreate.credential!.credentialId;
+
+  await revokeSdk.revokeCredential(rvCredId, 'admin', '测试撤销');
+  await revokeSdk.validate({
+    credentialId: rvCredId,
+    productId: 'PROD-001',
+    sceneId: 'SCENE-001',
+    callerIdentity: consumer,
+    purpose: '测试',
+    expectedDataRows: 100,
+    expectedDataSizeKB: 500
+  });
+
+  const rvRejections = await revokeSdk.listRejectionEvents();
+  const revokedRej = rvRejections.find(r => r.errorCode === ErrorCode.CREDENTIAL_REVOKED);
+  assert(revokedRej !== undefined, '存在CREDENTIAL_REVOKED拒绝事件');
+  assert(revokedRej!.category === 'CREDENTIAL_STATUS', '撤销拒绝分类为CREDENTIAL_STATUS');
+  console.log(`撤销拒绝事件: errorCode=${revokedRej!.errorCode}, category=${revokedRej!.category}`);
+
+  console.log('\n--- 测试36: 清理测试数据 ---');
   cleanup();
   assert(!fs.existsSync(testStorageDir), '测试数据已清理');
 

@@ -5,6 +5,7 @@ import { AuthPolicyManager } from './policy/AuthPolicyManager';
 import { AuditReportGenerator } from './audit/AuditReportGenerator';
 import {
   AuthCredential,
+  AuditRejectionEvent,
   AuditSummary,
   AuthPolicy,
   BatchValidationItem,
@@ -19,6 +20,7 @@ import {
   PreCheckParams,
   PreCheckResult,
   QuotaConfig,
+  RejectionCategory,
   ReportQuery,
   SDKError,
   SubjectIdentity,
@@ -35,7 +37,9 @@ import {
   PeriodUsage,
   PeriodType,
   PolicyMatchResult,
-  PolicyRule
+  PolicyRule,
+  RejectionReasonSummary,
+  AggregatedPeriodUsage
 } from './types';
 import {
   calculateRemainingDays,
@@ -357,10 +361,24 @@ export class DataAuthCredentialSDK {
   async generateReportByProduct(productId: string, query?: Partial<ReportQuery>): Promise<UsageReport> {
     return this.reportGenerator.generateByProduct(productId, query);
   }
+
+  async listRejectionEvents(filter?: {
+    startTime?: number;
+    endTime?: number;
+    credentialId?: string;
+    providerId?: string;
+    consumerId?: string;
+    productId?: string;
+    errorCode?: ErrorCode;
+    category?: RejectionCategory;
+  }): Promise<AuditRejectionEvent[]> {
+    return this.manager.listRejectionEvents(filter);
+  }
 }
 
 export {
   AuthCredential,
+  AuditRejectionEvent,
   AuditSummary,
   AuthPolicy,
   AuthorizationOrder,
@@ -377,6 +395,9 @@ export {
   PreCheckParams,
   PreCheckResult,
   QuotaConfig,
+  RejectionCategory,
+  RejectionReasonSummary,
+  AggregatedPeriodUsage,
   ReportQuery,
   SDKError,
   SubjectIdentity,

@@ -1,4 +1,4 @@
-import { ErrorCode, PeriodType, SDKError } from './types';
+import { ErrorCode, PeriodType, RejectionCategory, SDKError } from './types';
 
 export function generateCredentialNo(): string {
   const timestamp = Date.now().toString(36).toUpperCase();
@@ -166,4 +166,32 @@ export function getPeriodRange(periodType: PeriodType, timestamp: number): { sta
 
 export function isNewPeriod(currentPeriodKey: string, newPeriodKey: string): boolean {
   return currentPeriodKey !== newPeriodKey;
+}
+
+export function generateRejectionEventId(): string {
+  return `REJ-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+}
+
+export function getRejectionCategory(errorCode: ErrorCode): RejectionCategory {
+  const categoryMap: Record<string, RejectionCategory> = {
+    [ErrorCode.POLICY_VIOLATION]: 'POLICY',
+    [ErrorCode.POLICY_REQUIRED_FIELD]: 'POLICY',
+    [ErrorCode.POLICY_SUBJECT_TYPE]: 'POLICY',
+    [ErrorCode.IDENTITY_MISMATCH]: 'IDENTITY',
+    [ErrorCode.CREDENTIAL_REVOKED]: 'CREDENTIAL_STATUS',
+    [ErrorCode.CREDENTIAL_EXPIRED]: 'CREDENTIAL_STATUS',
+    [ErrorCode.CREDENTIAL_EXHAUSTED]: 'CREDENTIAL_STATUS',
+    [ErrorCode.CREDENTIAL_NOT_FOUND]: 'CREDENTIAL_STATUS',
+    [ErrorCode.INVALID_CREDENTIAL]: 'CREDENTIAL_STATUS',
+    [ErrorCode.QUOTA_INSUFFICIENT]: 'QUOTA',
+    [ErrorCode.SCOPE_MISMATCH]: 'SCOPE',
+    [ErrorCode.INVALID_PRODUCT]: 'SCOPE',
+    [ErrorCode.INVALID_SCENE]: 'SCOPE',
+    [ErrorCode.INVALID_CALL_COUNT]: 'PARAM',
+    [ErrorCode.INVALID_DATA_ROWS]: 'PARAM',
+    [ErrorCode.INVALID_DATA_SIZE]: 'PARAM',
+    [ErrorCode.PRECHECK_REQUIRED]: 'PARAM',
+    [ErrorCode.PURPOSE_REQUIRED]: 'PARAM'
+  };
+  return categoryMap[errorCode] || 'OTHER';
 }

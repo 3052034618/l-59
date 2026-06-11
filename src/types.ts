@@ -284,11 +284,55 @@ export interface SDKError {
   timestamp: number;
 }
 
+export type RejectionCategory = 'POLICY' | 'IDENTITY' | 'CREDENTIAL_STATUS' | 'QUOTA' | 'SCOPE' | 'PARAM' | 'OTHER';
+
+export interface AuditRejectionEvent {
+  eventId: string;
+  timestamp: number;
+  credentialId: string;
+  credentialNo?: string;
+  providerId: string;
+  providerName?: string;
+  consumerId: string;
+  consumerName?: string;
+  productId?: string;
+  sceneId?: string;
+  errorCode: ErrorCode;
+  errorMessage: string;
+  category: RejectionCategory;
+  policyId?: string;
+  policyName?: string;
+  ruleId?: string;
+  ruleName?: string;
+  callerIdentityId?: string;
+  details?: Record<string, unknown>;
+}
+
+export interface RejectionReasonSummary {
+  errorCode: ErrorCode;
+  category: RejectionCategory;
+  message: string;
+  count: number;
+  sampleEvents: AuditRejectionEvent[];
+}
+
 export interface IStorage {
   get(credentialId: string): Promise<AuthCredential | null>;
   set(credentialId: string, credential: AuthCredential): Promise<void>;
   delete(credentialId: string): Promise<void>;
   list(): Promise<AuthCredential[]>;
+
+  addRejectionEvent(event: AuditRejectionEvent): Promise<void>;
+  listRejectionEvents(filter?: {
+    startTime?: number;
+    endTime?: number;
+    credentialId?: string;
+    providerId?: string;
+    consumerId?: string;
+    productId?: string;
+    errorCode?: ErrorCode;
+    category?: RejectionCategory;
+  }): Promise<AuditRejectionEvent[]>;
 }
 
 export type PolicyTargetType = 'PRODUCT' | 'SCENE' | 'PROVIDER' | 'CONSUMER' | 'GLOBAL';
@@ -343,6 +387,17 @@ export interface ReportQuery {
   includePeriodDetails?: boolean;
   includeRevocationRecords?: boolean;
   includeRejectionStats?: boolean;
+  filterByTimeRange?: boolean;
+}
+
+export interface AggregatedPeriodUsage {
+  periodKey: string;
+  periodStart?: number;
+  periodEnd?: number;
+  usedCalls: number;
+  usedRows: number;
+  usedSizeKB: number;
+  credentialCount: number;
 }
 
 export interface UsageReportItem {
@@ -358,21 +413,10 @@ export interface UsageReportItem {
   activeCount: number;
   exhaustedCount: number;
   rejectionCount: number;
-  currentPeriodUsage?: {
-    periodKey: string;
-    usedCalls: number;
-    usedRows: number;
-    usedSizeKB: number;
-    maxCalls: number;
-    maxRows?: number;
-    maxSizeKB?: number;
-  };
-  periodHistory?: Array<{
-    periodKey: string;
-    usedCalls: number;
-    usedRows: number;
-    usedSizeKB: number;
-  }>;
+  periodUsages?: AggregatedPeriodUsage[];
+  rejectionSummary?: RejectionReasonSummary[];
+  currentPeriodUsage?: AggregatedPeriodUsage;
+  periodHistory?: AggregatedPeriodUsage[];
 }
 
 export interface UsageReport {
@@ -387,5 +431,6 @@ export interface UsageReport {
     totalRevoked: number;
     totalExpired: number;
     totalRejections: number;
+    rejectionSummary?: RejectionReasonSummary[];
   };
 }

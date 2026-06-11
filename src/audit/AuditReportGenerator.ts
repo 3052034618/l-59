@@ -1,12 +1,15 @@
 import {
+  AggregatedPeriodUsage,
+  AuditRejectionEvent,
   AuthCredential,
   CredentialStatus,
   ReportQuery,
+  RejectionReasonSummary,
   UsageReport,
   UsageReportItem
 } from '../types';
 import { IStorage } from '../types';
-import { formatTimestamp } from '../utils';
+import { formatTimestamp, getErrorMessage } from '../utils';
 
 export class AuditReportGenerator {
   private storage: IStorage;
@@ -38,46 +41,52 @@ export class AuditReportGenerator {
       const providerCreds = filteredCredentials.filter(
         c => c.order.provider.id === query.providerId
       );
-      items.push(this.aggregateCredentials(
-        'PROVIDER',
-        query.providerId,
-        filteredCredentials[0]?.order.provider.name || '未知提供方',
-        providerCreds,
-        query
-      ));
+      if (providerCreds.length > 0) {
+        items.push(await this.aggregateCredentials(
+          'PROVIDER',
+          query.providerId,
+          providerCreds[0].order.provider.name,
+          providerCreds,
+          query
+        ));
+      }
     }
 
     if (query.consumerId) {
       const consumerCreds = filteredCredentials.filter(
         c => c.order.consumer.id === query.consumerId
       );
-      items.push(this.aggregateCredentials(
-        'CONSUMER',
-        query.consumerId,
-        filteredCredentials[0]?.order.consumer.name || '未知使用方',
-        consumerCreds,
-        query
-      ));
+      if (consumerCreds.length > 0) {
+        items.push(await this.aggregateCredentials(
+          'CONSUMER',
+          query.consumerId,
+          consumerCreds[0].order.consumer.name,
+          consumerCreds,
+          query
+        ));
+      }
     }
 
     if (query.productId) {
       const productCreds = filteredCredentials.filter(
         c => c.order.scope.products.some(p => p.productId === query.productId)
       );
-      const productName = productCreds[0]?.order.scope.products.find(
-        p => p.productId === query.productId
-      )?.productName || '未知产品';
-      items.push(this.aggregateCredentials(
-        'PRODUCT',
-        query.productId,
-        productName,
-        productCreds,
-        query
-      ));
+      if (productCreds.length > 0) {
+        const productName = productCreds[0].order.scope.products.find(
+          p => p.productId === query.productId
+        )?.productName || '未知产品';
+        items.push(await this.aggregateCredentials(
+          'PRODUCT',
+          query.productId,
+          productName,
+          productCreds,
+          query
+        ));
+      }
     }
 
     if (!query.providerId && !query.consumerId && !query.productId) {
-      items.push(this.aggregateCredentials(
+      items.push(await this.aggregateCredentials(
         'GLOBAL',
         'ALL',
         '全部维度汇总',
@@ -86,6 +95,20 @@ export class AuditReportGenerator {
       ));
     }
 
+    const allRejectionEvents = query.includeRejectionStats
+      ? await this.storage.listRejectionEvents({
+          startTime: query.filterByTimeRange !== false ? query.startTime : undefined,
+          endTime: query.filterByTimeRange !== false ? query.endTime : undefined,
+          providerId: query.providerId,
+          consumerId: query.consumerId,
+          productId: query.productId
+        })
+      : [];
+
+    const summaryRejectionSummary = query.includeRejectionStats
+      ? this.buildRejectionSummary(allRejectionEvents)
+      : undefined;
+
     const summary = {
       totalCredentials: filteredCredentials.length,
       totalCalls: items.reduce((sum, i) => sum + i.totalCalls, 0),
@@ -93,7 +116,8 @@ export class AuditReportGenerator {
       totalDataSizeKB: items.reduce((sum, i) => sum + i.totalDataSizeKB, 0),
       totalRevoked: items.reduce((sum, i) => sum + i.revokedCount, 0),
       totalExpired: items.reduce((sum, i) => sum + i.expiredCount, 0),
-      totalRejections: items.reduce((sum, i) => sum + i.rejectionCount, 0)
+      totalRejections: allRejectionEvents.length,
+      rejectionSummary: summaryRejectionSummary
     };
 
     return {
@@ -110,6 +134,10 @@ export class AuditReportGenerator {
       startTime: 0,
       endTime: now,
       providerId,
+      filterByTimeRange: true,
+      includePeriodDetails: true,
+      includeRejectionStats: true,
+      includeRevocationRecords: true,
       ...query
     });
   }
@@ -120,6 +148,10 @@ export class AuditReportGenerator {
       startTime: 0,
       endTime: now,
       consumerId,
+      filterByTimeRange: true,
+      includePeriodDetails: true,
+      includeRejectionStats: true,
+      includeRevocationRecords: true,
       ...query
     });
   }
@@ -130,27 +162,64 @@ export class AuditReportGenerator {
       startTime: 0,
       endTime: now,
       productId,
+      filterByTimeRange: true,
+      includePeriodDetails: true,
+      includeRejectionStats: true,
+      includeRevocationRecords: true,
       ...query
     });
   }
 
-  private aggregateCredentials(
+  private async aggregateCredentials(
     dimension: string,
     dimensionValue: string,
     dimensionName: string,
     credentials: AuthCredential[],
     query: ReportQuery
-  ): UsageReportItem {
-    const totalCalls = credentials.reduce((sum, c) => sum + c.totalUsedCalls, 0);
-    const totalDataRows = credentials.reduce((sum, c) => sum + (c.totalUsedRows || 0), 0);
-    const totalDataSizeKB = credentials.reduce((sum, c) => sum + (c.totalUsedSizeKB || 0), 0);
+  ): Promise<UsageReportItem> {
+    const filterByTime = query.filterByTimeRange !== false;
+
+    let totalCalls = 0;
+    let totalDataRows = 0;
+    let totalDataSizeKB = 0;
+
+    const periodMap = new Map<string, AggregatedPeriodUsage>();
+
+    for (const cred of credentials) {
+      for (const log of cred.usageLogs) {
+        if (filterByTime) {
+          if (log.timestamp < query.startTime || log.timestamp > query.endTime) {
+            continue;
+          }
+        }
+        totalCalls += log.callCount;
+        totalDataRows += log.dataRows || 0;
+        totalDataSizeKB += log.dataSizeKB || 0;
+      }
+
+      if (query.includePeriodDetails) {
+        this.accumulatePeriodUsage(periodMap, cred.currentPeriod, cred, filterByTime, query);
+        for (const hist of cred.periodHistory) {
+          this.accumulatePeriodUsage(periodMap, hist, cred, filterByTime, query);
+        }
+      }
+    }
 
     const activeCount = credentials.filter(c => c.status === CredentialStatus.ACTIVE).length;
     const revokedCount = credentials.filter(c => c.status === CredentialStatus.REVOKED).length;
     const expiredCount = credentials.filter(c => c.status === CredentialStatus.EXPIRED).length;
     const exhaustedCount = credentials.filter(c => c.status === CredentialStatus.EXHAUSTED).length;
 
-    const rejectionCount = this.calculateRejectionCount(credentials, query);
+    let rejectionEvents: AuditRejectionEvent[] = [];
+    if (query.includeRejectionStats) {
+      rejectionEvents = await this.storage.listRejectionEvents({
+        startTime: filterByTime ? query.startTime : undefined,
+        endTime: filterByTime ? query.endTime : undefined,
+        providerId: dimension === 'PROVIDER' ? dimensionValue : undefined,
+        consumerId: dimension === 'CONSUMER' ? dimensionValue : undefined,
+        productId: dimension === 'PRODUCT' ? dimensionValue : undefined
+      });
+    }
 
     const item: UsageReportItem = {
       dimension,
@@ -164,30 +233,24 @@ export class AuditReportGenerator {
       expiredCount,
       activeCount,
       exhaustedCount,
-      rejectionCount
+      rejectionCount: rejectionEvents.length
     };
 
-    if (query.includePeriodDetails && credentials.length > 0) {
-      const latestCred = credentials.sort((a, b) =>
-        new Date(b.order.createdAt).getTime() - new Date(a.order.createdAt).getTime()
-      )[0];
+    if (query.includePeriodDetails) {
+      const sortedPeriods = Array.from(periodMap.values()).sort((a, b) =>
+        a.periodKey.localeCompare(b.periodKey)
+      );
+      item.periodUsages = sortedPeriods;
 
-      item.currentPeriodUsage = {
-        periodKey: latestCred.currentPeriod.periodKey,
-        usedCalls: latestCred.currentPeriod.usedCalls,
-        usedRows: latestCred.currentPeriod.usedRows,
-        usedSizeKB: latestCred.currentPeriod.usedSizeKB,
-        maxCalls: latestCred.order.quota.maxCalls,
-        maxRows: latestCred.order.quota.maxDataRows,
-        maxSizeKB: latestCred.order.quota.maxDataSizeKB
-      };
+      if (sortedPeriods.length > 0) {
+        const latest = sortedPeriods[sortedPeriods.length - 1];
+        item.currentPeriodUsage = latest;
+        item.periodHistory = sortedPeriods.slice(0, -1);
+      }
+    }
 
-      item.periodHistory = latestCred.periodHistory.map(p => ({
-        periodKey: p.periodKey,
-        usedCalls: p.usedCalls,
-        usedRows: p.usedRows,
-        usedSizeKB: p.usedSizeKB
-      }));
+    if (query.includeRejectionStats) {
+      item.rejectionSummary = this.buildRejectionSummary(rejectionEvents);
     }
 
     if (query.includeRevocationRecords) {
@@ -204,16 +267,77 @@ export class AuditReportGenerator {
     return item;
   }
 
-  private calculateRejectionCount(credentials: AuthCredential[], query: ReportQuery): number {
-    if (!query.includeRejectionStats) return 0;
-
-    let count = 0;
-    for (const cred of credentials) {
-      const logs = cred.usageLogs.filter(l =>
-        l.timestamp >= query.startTime && l.timestamp <= query.endTime
-      );
-      count += logs.filter(l => l.remark?.includes('REJECT') || l.remark?.includes('拒绝')).length;
+  private accumulatePeriodUsage(
+    periodMap: Map<string, AggregatedPeriodUsage>,
+    periodUsage: { periodKey: string; usedCalls: number; usedRows: number; usedSizeKB: number; periodStart?: number; periodEnd?: number },
+    credential: AuthCredential,
+    filterByTime: boolean,
+    query: ReportQuery
+  ): void {
+    const key = periodUsage.periodKey;
+    if (!periodMap.has(key)) {
+      periodMap.set(key, {
+        periodKey: key,
+        periodStart: periodUsage.periodStart,
+        periodEnd: periodUsage.periodEnd,
+        usedCalls: 0,
+        usedRows: 0,
+        usedSizeKB: 0,
+        credentialCount: 0
+      });
     }
-    return count;
+
+    const aggregated = periodMap.get(key)!;
+
+    if (filterByTime) {
+      const ps = periodUsage.periodStart || 0;
+      const pe = periodUsage.periodEnd || Date.now();
+      if (pe < query.startTime || ps > query.endTime) {
+        return;
+      }
+    }
+
+    aggregated.usedCalls += periodUsage.usedCalls;
+    aggregated.usedRows += periodUsage.usedRows;
+    aggregated.usedSizeKB += periodUsage.usedSizeKB;
+    aggregated.credentialCount += 1;
+  }
+
+  private buildRejectionSummary(events: AuditRejectionEvent[]): RejectionReasonSummary[] {
+    const map = new Map<string, {
+      errorCode: string;
+      category: string;
+      message: string;
+      count: number;
+      samples: AuditRejectionEvent[];
+    }>();
+
+    for (const ev of events) {
+      const key = `${ev.category}:${ev.errorCode}`;
+      if (!map.has(key)) {
+        map.set(key, {
+          errorCode: ev.errorCode,
+          category: ev.category,
+          message: getErrorMessage(ev.errorCode),
+          count: 0,
+          samples: []
+        });
+      }
+      const entry = map.get(key)!;
+      entry.count += 1;
+      if (entry.samples.length < 3) {
+        entry.samples.push(ev);
+      }
+    }
+
+    return Array.from(map.values())
+      .sort((a, b) => b.count - a.count)
+      .map(e => ({
+        errorCode: e.errorCode as any,
+        category: e.category as any,
+        message: e.message,
+        count: e.count,
+        sampleEvents: e.samples
+      }));
   }
 }
